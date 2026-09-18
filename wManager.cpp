@@ -233,7 +233,8 @@ void init_WifiManager()
   }
   WiFiManagerParameter save_stats_to_nvs("SaveStatsToNVS", "Save mining statistics to flash memory.", "T", 2, checkboxParams, WFM_LABEL_AFTER);
   // Text box (String) - 80 characters maximum
-  WiFiManagerParameter password_text_box("Poolpassword", "Pool password (Optional)", Settings.PoolPassword, 80, "type=\"password\"");
+  // ID must not contain spaces (HTML id/name). Default password is "x".
+  WiFiManagerParameter password_text_box("Poolpassword", "Pool password (optional, e.g. d=0.0001 for difficulty)", Settings.PoolPassword, 80);
 
   // Add all defined parameters
   wm.addParameter(&pool_text_box);
@@ -277,7 +278,9 @@ void init_WifiManager()
             Settings.PoolAddress = pool_text_box.getValue();
             Settings.PoolPort = atoi(port_text_box_num.getValue());
             strncpy(Settings.PoolPassword, password_text_box.getValue(), sizeof(Settings.PoolPassword));
+            Settings.PoolPassword[sizeof(Settings.PoolPassword) - 1] = '\0';
             strncpy(Settings.BtcWallet, addr_text_box.getValue(), sizeof(Settings.BtcWallet));
+            Settings.BtcWallet[sizeof(Settings.BtcWallet) - 1] = '\0';
             Settings.Timezone = atoi(time_text_box_num.getValue());
             //Serial.println(save_stats_to_nvs.getValue());
             Settings.saveStats = (strncmp(save_stats_to_nvs.getValue(), "T", 1) == 0);
@@ -310,7 +313,9 @@ void init_WifiManager()
                 Settings.PoolAddress = pool_text_box.getValue();
                 Settings.PoolPort = atoi(port_text_box_num.getValue());
                 strncpy(Settings.PoolPassword, password_text_box.getValue(), sizeof(Settings.PoolPassword));
+                Settings.PoolPassword[sizeof(Settings.PoolPassword) - 1] = '\0';
                 strncpy(Settings.BtcWallet, addr_text_box.getValue(), sizeof(Settings.BtcWallet));
+                Settings.BtcWallet[sizeof(Settings.BtcWallet) - 1] = '\0';
                 Settings.Timezone = atoi(time_text_box_num.getValue());
                 // Serial.println(save_stats_to_nvs.getValue());
                 Settings.saveStats = (strncmp(save_stats_to_nvs.getValue(), "T", 1) == 0);
@@ -351,11 +356,13 @@ void init_WifiManager()
 
         // Copy the string value
         strncpy(Settings.PoolPassword, password_text_box.getValue(), sizeof(Settings.PoolPassword));
+        Settings.PoolPassword[sizeof(Settings.PoolPassword) - 1] = '\0';
         Serial.print("poolPassword: ");
         Serial.println(Settings.PoolPassword);
 
         // Copy the string value
         strncpy(Settings.BtcWallet, addr_text_box.getValue(), sizeof(Settings.BtcWallet));
+        Settings.BtcWallet[sizeof(Settings.BtcWallet) - 1] = '\0';
         Serial.print("btcString: ");
         Serial.println(Settings.BtcWallet);
 
@@ -393,11 +400,13 @@ void init_WifiManager()
 
     // Copy the string value
     strncpy(Settings.PoolPassword, password_text_box.getValue(), sizeof(Settings.PoolPassword));
+    Settings.PoolPassword[sizeof(Settings.PoolPassword) - 1] = '\0';
     Serial.print("poolPassword: ");
     Serial.println(Settings.PoolPassword);
 
     // Copy the string value
     strncpy(Settings.BtcWallet, addr_text_box.getValue(), sizeof(Settings.BtcWallet));
+    Settings.BtcWallet[sizeof(Settings.BtcWallet) - 1] = '\0';
     Serial.print("btcString: ");
     Serial.println(Settings.BtcWallet);
 
