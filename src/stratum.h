@@ -21,7 +21,7 @@ typedef struct {
     String extranonce2;
     int extranonce2_size;
     char wName[80];
-    char wPass[20];
+    char wPass[99];
 } mining_subscribe;
 
 typedef struct {
