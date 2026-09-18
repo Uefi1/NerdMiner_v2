@@ -58,3 +58,31 @@ NerdMiner_v2 — фикс поля "Pool password" + сборка только �
 "Pool password (Optional)". Введённое значение сохраняется в
 Settings.PoolPassword и передаётся в mWorker.wPass при авторизации
 на stratum-пуле (src/mining.cpp), т.е. полностью рабочее end-to-end.
+
+================================================================================
+ДОПОЛНИТЕЛЬНО: фикс CI-релиза (.github/workflows/release.yml)
+================================================================================
+
+СИМПТОМ
+-------
+В логе GitHub Actions джоба "release" падала на шаге trstringer/manual-approval:
+  error creating issue: POST .../issues: 410 Issues has been disabled in this repository.
+
+ПРИЧИНА
+-------
+1) В форке в настройках репозитория выключены Issues (Settings > General >
+   Features > Issues), а manual-approval создаёт issue для подтверждения релиза.
+2) Даже если включить Issues, approver там прописан как "BitMaker-hub" —
+   аккаунт мейнтейнера апстрима, у него нет прав аппрувить в твоём форке,
+   релиз просто провисит 120 минут и свалится по таймауту.
+
+ЧТО ИСПРАВЛЕНО
+--------------
+Шаг trstringer/manual-approval и permission "issues: write" удалены из job
+"release". Теперь после успешной сборки релиз на GitHub публикуется сразу,
+без ожидания стороннего подтверждения — то есть логично для личного форка.
+
+ЕСЛИ ХОЧЕШЬ ОСТАВИТЬ РУЧНОЕ ПОДТВЕРЖДЕНИЕ (альтернатива, ничего патчить не надо)
+---------------------------------------------------------------------------------
+1. Включи Issues: Settings > General > Features > Issues (галочка).
+2. В release.yml замени approvers: BitMaker-hub на approvers: <твой GitHub логин>.
