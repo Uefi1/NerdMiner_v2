@@ -40,19 +40,9 @@ jobs:
     permissions:
       contents: write
       discussions: write
-      issues: write
     runs-on: ubuntu-latest
     if: github.ref == 'refs/heads/main'
     steps:
-      - uses: trstringer/manual-approval@v1
-        timeout-minutes: 120
-        with:
-          secret: ${{ github.TOKEN }}
-          approvers: BitMaker-hub
-          minimum-approvals: 1
-          issue-title: "Releasing Nerdminer version ${{ needs.build.outputs.version }}"
-          issue-body: "Please approve or deny the release of ${{ needs.build.outputs.version }}."
-          exclude-workflow-initiator-as-approver: false
       - name: Download firmware files
         uses: actions/download-artifact@v4
         with:
