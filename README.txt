@@ -1,51 +1,52 @@
-NerdMiner_v2 — ESP32-S3-devKitv1 pool-password patch
+# Исправленный патч Pool Password для Uefi1/NerdMiner_v2
 
-Target:
-  PlatformIO environment: ESP32-S3-devKitv1
-  board: esp32-s3-devkitc-1
+Это ИСПРАВЛЕННАЯ версия патча после проверки актуального `main` Uefi1/NerdMiner_v2.
 
-This patch:
-  - fixes the WiFiManager parameter ID so the pool-password field is accepted;
-  - makes the web field a password input;
-  - keeps PoolPassword at 80 bytes end-to-end;
-  - prevents the old 20-byte wPass overflow;
-  - guarantees NUL termination after strncpy;
-  - stops printing the actual pool password to Serial.
+Причина, почему поле не появлялось:
+в `src/wManager.cpp` поле создавалось с ID:
+    Poolpassword - Optional
 
-IMPORTANT:
-  Do NOT apply the earlier pool-password patch from this conversation.
-  Apply only this patch to a clean/current Uefi1/NerdMiner_v2 checkout.
+WiFiManager не принимает пробелы/дефисы в ID параметров. Поэтому параметр
+фактически не отображался. Исправление использует ID `Poolpassword` и
+`type="password"`.
 
-Apply:
-  git apply nerdminer_pool_password_esp32s3.patch
+Дополнительно:
+- `wPass` увеличен с 20 до 80 байт;
+- копирование сделано через snprintf;
+- добавлена гарантированная NUL-терминация после strncpy;
+- пароль больше не печатается открытым текстом в Serial.
 
-Build ONLY the requested target:
-  pio run -e ESP32-S3-devKitv1
+ВАЖНО:
+Не применяй предыдущий ZIP-патч. Используй только этот.
 
-The project's post_build_merge.py creates:
-  firmware/<version>/ESP32-S3-devKitv1_firmware.bin
-  firmware/<version>/ESP32-S3-devKitv1_factory.bin
+Применение к ЧИСТОМУ Uefi1/NerdMiner_v2:
+    git apply nerdminer_pool_password_ESP32S3_fixed.patch
 
-If using GitHub Actions, run the build for ESP32-S3-devKitv1 only. The source patch
-does not alter other board environments.
+Проверка:
+    git diff --check
+    git diff
 
-Flashing:
-  - Factory/full install: use ESP32-S3-devKitv1_factory.bin.
-  - Firmware-only update on an already compatible installation: use
-    ESP32-S3-devKitv1_firmware.bin at the firmware/application offset used by
-    the project's flasher (normally 0x10000).
+Сборка только ESP32-S3-devKitv1:
+    pio run -e ESP32-S3-devKitv1
 
-For a first install, prefer the factory image or the repository's web flasher.
-Do not erase flash unless you deliberately want to remove existing configuration.
+Для GitHub Actions убедись, что workflow собирает именно:
+    ESP32-S3-devKitv1
 
-After flashing:
-  1. connect to NerdMinerAP;
-  2. open the configuration portal;
-  3. the new "Pool password (Optional)" field should be visible;
-  4. enter the pool password/options and save;
-  5. reboot and check the serial log if needed.
+После сборки нужны:
+    ESP32-S3-devKitv1_factory.bin
+    ESP32-S3-devKitv1_firmware.bin
 
-Security note:
-  The password is only masked in the web form and is no longer printed in clear
-  text to Serial. It is still stored in the device configuration, so this is not
-  encryption-at-rest.
+Для первой установки factory.bin является merged/full image и прошивается с 0x000000.
+Для обычного обновления firmware.bin используй адрес, предусмотренный flasher
+проекта (обычно 0x10000).
+
+После прошивки:
+1. Снова открой Config Portal.
+2. Должно появиться `Pool password (Optional)` между Pool port и Your BTC address.
+3. Поле будет скрывать введённые символы.
+4. Введи пароль и сохрани настройки.
+
+Если после применения ЭТОГО патча поле снова не появится, не прошивай ничего
+дальше наугад: пришли ссылку на commit/Action run, который GitHub собрал, или
+лог GitHub Actions. Тогда можно будет проверить именно тот исходник, из которого
+получился BIN.
