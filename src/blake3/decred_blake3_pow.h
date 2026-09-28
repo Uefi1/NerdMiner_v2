@@ -43,13 +43,9 @@ typedef struct {
     uint32_t block_height;             // offset 128, 4 bytes
     uint32_t block_size;               // offset 132, 4 bytes
     uint32_t timestamp;                // offset 136, 4 bytes
-    uint8_t  extra_data[36];           // offset 140, 36 bytes
-                                        //   recommended split (not enforced
-                                        //   by consensus, just convention):
-                                        //     bytes 0-7  : per-device nonce
-                                        //     bytes 8-11 : pool nonce
-                                        //     bytes 12-35: zero
-    uint32_t stake_version;            // offset 176, 4 bytes
+    uint8_t  extra_data[32];           // offset 140, 32 bytes (wire ExtraData)
+    uint32_t stake_version;            // offset 172, 4 bytes
+    uint32_t nonce;                    // offset 176, 4 bytes  (PoW nonce)
 } decred_block_header_t;
 
 // Serializes the header fields into `out` (must be at least

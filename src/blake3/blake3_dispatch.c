@@ -1,3 +1,4 @@
+#pragma GCC optimize ("O3")
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>

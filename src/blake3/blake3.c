@@ -1,3 +1,4 @@
+#pragma GCC optimize ("O3")
 #include <assert.h>
 #include <stdbool.h>
 #include <string.h>

@@ -1,3 +1,4 @@
+#pragma GCC optimize ("O3")
 #include "blake3_impl.h"
 #include <string.h>
 
