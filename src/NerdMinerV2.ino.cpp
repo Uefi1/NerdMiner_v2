@@ -167,19 +167,21 @@ void setup()
     xTaskCreate(minerWorkerHw, "MinerHw-0", 4096, (void*)0, 3, &minerTask1);
     #endif
   #else
+    // Pin miner 0 to CORE 0 (pure mining, no WiFi/stratum)
     #if defined(CONFIG_IDF_TARGET_ESP32)
-    xTaskCreate(minerWorkerSw, "MinerSw-0", 8192, (void*)0, 1, &minerTask1); // Reduced for ESP32 classic
+    xTaskCreatePinnedToCore(minerWorkerSw, "MinerSw-0", 8192, (void*)0, 3, &minerTask1, 0);
     #else
-    xTaskCreate(minerWorkerSw, "MinerSw-0", 8192, (void*)0, 1, &minerTask1);
+    xTaskCreatePinnedToCore(minerWorkerSw, "MinerSw-0", 8192, (void*)0, 3, &minerTask1, 0);
     #endif
   #endif
   esp_task_wdt_add(minerTask1);
 
 #if (SOC_CPU_CORES_NUM >= 2)
+  // Pin miner 1 to CORE 1 (shares with stratum/monitor — still needed for dual-core HR)
   #if defined(CONFIG_IDF_TARGET_ESP32)
-  xTaskCreate(minerWorkerSw, "MinerSw-1", 8192, (void*)1, 1, &minerTask2); // Reduced for ESP32 classic
+  xTaskCreatePinnedToCore(minerWorkerSw, "MinerSw-1", 8192, (void*)1, 2, &minerTask2, 1);
   #else
-  xTaskCreate(minerWorkerSw, "MinerSw-1", 8192, (void*)1, 1, &minerTask2);
+  xTaskCreatePinnedToCore(minerWorkerSw, "MinerSw-1", 8192, (void*)1, 2, &minerTask2, 1);
   #endif
   esp_task_wdt_add(minerTask2);
 #endif
