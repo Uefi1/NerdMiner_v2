@@ -1,20 +1,17 @@
-CLEAN restore of SHA256d from official BitMaker-hub/NerdMiner_v2
+S3_SHA256d_MAX — apply ONLY this package
 
-Previous "restore" still had BLAKE3 leftovers in mining.cpp
-(JobPush with decred_header, soft-only path) → ~50-60 kH/s.
+Based on BitMaker-hub/NerdMiner_v2 pure SHA256d + HARDWARE_SHA265
 
-This package replaces mining stack with ORIGINAL BitMaker code:
-  - HARDWARE_SHA265 enabled
-  - minerWorkerHw (HW SHA) + minerWorkerSw
-  - original JobPush / midstate / NONCE_PER_JOB_HW = 16*1024
-  - NO decred/blake3 in mining path
+Changes vs stock:
+1. MinerHw pinned to CORE 0 (prio 3)
+2. MinerSw-1 pinned to CORE 1
+3. NONCE_PER_JOB_HW 32K (was 16K)
+4. S3: midstate words byte-swapped when writing SHA_H (endian fix attempt)
+5. stratum checkError safe for array+object errors
+6. blake3/ excluded from build
+7. btStop if BT present
 
-Extra (safe):
-  - stratum checkError handles JSON object errors (no crash)
-  - MinerHw pinned to core 0
-  - Bluetooth disabled in platformio
-
-Copy into your fork root:
+Copy into fork root:
   platformio.ini
   src/mining.cpp
   src/mining.h
@@ -23,10 +20,8 @@ Copy into your fork root:
   src/NerdMinerV2.ino.cpp
   src/stratum.cpp
 
-Build env: ESP32-S3-devKitv1
-Pool: Bitcoin SHA256d only (not Decred)
+Pool: Bitcoin SHA256d only
+Expect Serial: [MINER] 0 Started minerWorkerHw Task!
+Expect hashrate: ~200-400 kH/s class (S3 HW), valid shares
 
-Expected Serial:
-  [MINER] 0 Started minerWorkerHw Task!
-  [MINER] 1 Started minerWorkerSw Task on core ...
-  hashrate ~200-400+ kH/s (HW SHA path)
+If shares=0 and hashrate high: S3 may ignore midstate CONTINUE — report log, we revert bswap.

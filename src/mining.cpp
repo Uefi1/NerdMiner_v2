@@ -21,7 +21,7 @@
 
 //10 Jobs per second
 #define NONCE_PER_JOB_SW 4096
-#define NONCE_PER_JOB_HW 16*1024
+#define NONCE_PER_JOB_HW 32*1024
 
 //#define I2C_SLAVE
 
@@ -761,7 +761,17 @@ static inline void nerd_sha_ll_write_digest(void *digest_state)
 {
     uint32_t *digest_state_words = (uint32_t *)digest_state;
     uint32_t *reg_addr_buf = (uint32_t *)(SHA_H_BASE);
-
+    /* ESP32-S3 SHA_H expects big-endian state words (esp-idf #12440 / SparkMiner #36) */
+#if defined(CONFIG_IDF_TARGET_ESP32S3)
+    REG_WRITE(&reg_addr_buf[0], __builtin_bswap32(digest_state_words[0]));
+    REG_WRITE(&reg_addr_buf[1], __builtin_bswap32(digest_state_words[1]));
+    REG_WRITE(&reg_addr_buf[2], __builtin_bswap32(digest_state_words[2]));
+    REG_WRITE(&reg_addr_buf[3], __builtin_bswap32(digest_state_words[3]));
+    REG_WRITE(&reg_addr_buf[4], __builtin_bswap32(digest_state_words[4]));
+    REG_WRITE(&reg_addr_buf[5], __builtin_bswap32(digest_state_words[5]));
+    REG_WRITE(&reg_addr_buf[6], __builtin_bswap32(digest_state_words[6]));
+    REG_WRITE(&reg_addr_buf[7], __builtin_bswap32(digest_state_words[7]));
+#else
     REG_WRITE(&reg_addr_buf[0], digest_state_words[0]);
     REG_WRITE(&reg_addr_buf[1], digest_state_words[1]);
     REG_WRITE(&reg_addr_buf[2], digest_state_words[2]);
@@ -770,6 +780,7 @@ static inline void nerd_sha_ll_write_digest(void *digest_state)
     REG_WRITE(&reg_addr_buf[5], digest_state_words[5]);
     REG_WRITE(&reg_addr_buf[6], digest_state_words[6]);
     REG_WRITE(&reg_addr_buf[7], digest_state_words[7]);
+#endif
 }
 
 static inline void nerd_sha_hal_wait_idle()
