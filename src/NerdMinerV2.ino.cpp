@@ -62,7 +62,6 @@ const char* ntpServer = "pool.ntp.org";
 /********* INIT *****/
 void setup()
 {
-  // Free RAM/CPU: Bluetooth not used by miner
 #if defined(CONFIG_BT_ENABLED)
   btStop();
 #endif
@@ -168,16 +167,27 @@ void setup()
   //BaseType_t res = xTaskCreate(runWorker, name, 35000, (void*)name, 1, NULL);
   TaskHandle_t minerTask1, minerTask2 = NULL;
   #ifdef HARDWARE_SHA265
-    // HW SHA256d on CORE 0 (dedicated — max hashrate)
+    #if defined(CONFIG_IDF_TARGET_ESP32)
+    xTaskCreatePinnedToCore(minerWorkerHw, "MinerHw-0", 3584, (void*)0, 3, &minerTask1, 0);
+    //xTaskCreate(minerWorkerSw, "MinerSw-0", 5000, (void*)0, 1, &minerTask1); // Reduced for ESP32 classic
+    #else
     xTaskCreatePinnedToCore(minerWorkerHw, "MinerHw-0", 4096, (void*)0, 3, &minerTask1, 0);
+    #endif
   #else
-    xTaskCreatePinnedToCore(minerWorkerSw, "MinerSw-0", 8192, (void*)0, 3, &minerTask1, 0);
+    #if defined(CONFIG_IDF_TARGET_ESP32)
+    xTaskCreate(minerWorkerSw, "MinerSw-0", 5000, (void*)0, 1, &minerTask1); // Reduced for ESP32 classic
+    #else
+    xTaskCreate(minerWorkerSw, "MinerSw-0", 6000, (void*)0, 1, &minerTask1);
+    #endif
   #endif
   esp_task_wdt_add(minerTask1);
 
 #if (SOC_CPU_CORES_NUM >= 2)
-  // Soft SHA256d on CORE 1 (fills leftover cycles next to stratum)
-  xTaskCreatePinnedToCore(minerWorkerSw, "MinerSw-1", 8192, (void*)1, 3, &minerTask2, 1);
+  #if defined(CONFIG_IDF_TARGET_ESP32)
+  xTaskCreatePinnedToCore(minerWorkerSw, "MinerSw-1", 5000, (void*)1, 1, &minerTask2, 1);
+  #else
+  xTaskCreatePinnedToCore(minerWorkerSw, "MinerSw-1", 6000, (void*)1, 1, &minerTask2, 1);
+  #endif
   esp_task_wdt_add(minerTask2);
 #endif
 

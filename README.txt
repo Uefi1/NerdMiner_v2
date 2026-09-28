@@ -1,25 +1,32 @@
-SHA256d restore + max performance (no CPU overclock)
+CLEAN restore of SHA256d from official BitMaker-hub/NerdMiner_v2
 
-Files to copy into your fork (Uefi1/NerdMiner_v2):
+Previous "restore" still had BLAKE3 leftovers in mining.cpp
+(JobPush with decred_header, soft-only path) → ~50-60 kH/s.
+
+This package replaces mining stack with ORIGINAL BitMaker code:
+  - HARDWARE_SHA265 enabled
+  - minerWorkerHw (HW SHA) + minerWorkerSw
+  - original JobPush / midstate / NONCE_PER_JOB_HW = 16*1024
+  - NO decred/blake3 in mining path
+
+Extra (safe):
+  - stratum checkError handles JSON object errors (no crash)
+  - MinerHw pinned to core 0
+  - Bluetooth disabled in platformio
+
+Copy into your fork root:
   platformio.ini
-  src/mining.h
   src/mining.cpp
+  src/mining.h
   src/utils.cpp
+  src/utils.h
   src/NerdMinerV2.ino.cpp
-  src/stratum.cpp   (keeps crash-safe checkError)
+  src/stratum.cpp
 
-What changed:
-  1. #define HARDWARE_SHA265  — HW SHA engine on
-  2. Decred/BLAKE3 path disabled when HARDWARE_SHA265 is on
-  3. DEFAULT_DIFFICULTY 0.00015 (Bitcoin pools)
-  4. MinerHw pinned CORE 0 prio 3, MinerSw pinned CORE 1 prio 3
-  5. Bluetooth disabled: -D CONFIG_BT_ENABLED=0 + btStop() if present
-  6. -O2 in platformio for S3 env
+Build env: ESP32-S3-devKitv1
+Pool: Bitcoin SHA256d only (not Decred)
 
-Pool: use a normal Bitcoin SHA256d pool (NOT dcr.suprnova).
-Example: public-pool.io:21496 or your previous BTC pool.
-
-Expected log:
-  [MINER] 0 Started minerWorkerHw Task!   (or similar on core 0)
-  [MINER] 1 Started minerWorkerSw (SHA256d) Task on core 1!
-  hashrate hundreds of kH/s (HW path), not ~50-60 kH/s
+Expected Serial:
+  [MINER] 0 Started minerWorkerHw Task!
+  [MINER] 1 Started minerWorkerSw Task on core ...
+  hashrate ~200-400+ kH/s (HW SHA path)

@@ -36,20 +36,20 @@ bool verifyPayload (String* line){
 bool checkError(const StaticJsonDocument<BUFFER_JSON_DOC> doc) {
   if (!doc.containsKey("error")) return false;
   if (doc["error"].isNull()) return false;
-
-  // Array [code,msg] OR object {code,message} (suprnova uses object)
   JsonVariantConst err = doc["error"];
   if (err.is<JsonArray>()) {
     if (err.size() == 0) return false;
     int code = err[0] | 0;
     const char* msg = err[1] | "unknown";
-    Serial.printf("ERROR: %d | reason: %s\n", code, msg);
+    Serial.printf("ERROR: %d | reason: %s
+", code, msg);
     return true;
   }
   if (err.is<JsonObject>()) {
     int code = err["code"] | 0;
     const char* msg = err["message"] | "unknown";
-    Serial.printf("ERROR: %d | reason: %s\n", code, msg);
+    Serial.printf("ERROR: %d | reason: %s
+", code, msg);
     return true;
   }
   Serial.println("ERROR: (non-null error field, unknown format)");

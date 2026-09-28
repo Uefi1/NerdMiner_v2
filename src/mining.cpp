@@ -4,10 +4,7 @@
 #include <esp_task_wdt.h>
 #include <nvs_flash.h>
 #include <nvs.h>
-// BLAKE3 / Decred PoW (replaces SHA256d)
-#include "blake3/decred_blake3_pow.h"
-#include "blake3/blake3.h"
-// keep sha headers so any residual references still compile if ifdef'd out
+//#include "ShaTests/nerdSHA256.h"
 #include "ShaTests/nerdSHA256plus.h"
 #include "stratum.h"
 #include "mining.h"
@@ -23,7 +20,7 @@
 #include "i2c_master.h"
 
 //10 Jobs per second
-#define NONCE_PER_JOB_SW 8192
+#define NONCE_PER_JOB_SW 4096
 #define NONCE_PER_JOB_HW 16*1024
 
 //#define I2C_SLAVE
@@ -122,10 +119,9 @@ bool checkPoolInactivity(unsigned int keepAliveTime, unsigned long inactivityTim
     if ( time_now > mLastTXtoPool + keepAliveTime)
     {
       mLastTXtoPool = time_now;
-      Serial.println("  Sending  : KeepAlive");
-      client.print("{}\n");
-      // Decred pools (suprnova) do not support mining.suggest_difficulty
-      // tx_suggest_difficulty(client, DEFAULT_DIFFICULTY);
+      Serial.println("  Sending  : KeepAlive suggest_difficulty");
+      //if (client.print("{}\n") == 0) {
+      tx_suggest_difficulty(client, DEFAULT_DIFFICULTY);
       /*if(tx_suggest_difficulty(client, DEFAULT_DIFFICULTY)){
         Serial.println("  Sending keepAlive to pool -> Detected client disconnected");
         return true;
@@ -152,9 +148,6 @@ struct JobRequest
   uint8_t sha_buffer[128];
   uint32_t midstate[8];
   uint32_t bake[16];
-  // Decred / BLAKE3: full 180-byte serialized header; nonce at offset 140 (8 bytes LE)
-  uint8_t decred_header[180];
-  bool is_decred;
 };
 
 struct JobResult
@@ -175,27 +168,16 @@ std::list<std::shared_ptr<JobResult>> s_job_result_list;
 static volatile uint8_t s_working_current_job_id = 0xFF;
 
 static void JobPush(std::list<std::shared_ptr<JobRequest>> &job_list,  uint32_t id, uint32_t nonce_start, uint32_t nonce_count, double difficulty,
-                    const uint8_t* sha_buffer, const uint32_t* midstate, const uint32_t* bake,
-                    const uint8_t* decred_header = nullptr)
+                    const uint8_t* sha_buffer, const uint32_t* midstate, const uint32_t* bake)
 {
   std::shared_ptr<JobRequest> job = std::make_shared<JobRequest>();
   job->id = id;
   job->nonce_start = nonce_start;
   job->nonce_count = nonce_count;
   job->difficulty = difficulty;
-  if (sha_buffer) memcpy(job->sha_buffer, sha_buffer, sizeof(job->sha_buffer));
-  else memset(job->sha_buffer, 0, sizeof(job->sha_buffer));
-  if (midstate) memcpy(job->midstate, midstate, sizeof(job->midstate));
-  else memset(job->midstate, 0, sizeof(job->midstate));
-  if (bake) memcpy(job->bake, bake, sizeof(job->bake));
-  else memset(job->bake, 0, sizeof(job->bake));
-  if (decred_header) {
-    memcpy(job->decred_header, decred_header, 180);
-    job->is_decred = true;
-  } else {
-    memset(job->decred_header, 0, 180);
-    job->is_decred = false;
-  }
+  memcpy(job->sha_buffer, sha_buffer, sizeof(job->sha_buffer));
+  memcpy(job->midstate, midstate, sizeof(job->midstate));
+  memcpy(job->bake, bake, sizeof(job->bake));
   job_list.push_back(job);
 }
 
@@ -300,17 +282,14 @@ void runStratumWorker(void *name) {
         continue; 
       }
       
-      snprintf(mWorker.wName, sizeof(mWorker.wName), "%s", Settings.BtcWallet);
-      snprintf(mWorker.wPass, sizeof(mWorker.wPass), "%s", Settings.PoolPassword);
+      strcpy(mWorker.wName, Settings.BtcWallet);
+      strcpy(mWorker.wPass, Settings.PoolPassword);
       // STEP 2: Pool authorize work (Block Info)
       tx_mining_auth(client, mWorker.wName, mWorker.wPass); //Don't verifies authoritzation, TODO
       //tx_mining_auth2(client, mWorker.wName, mWorker.wPass); //Don't verifies authoritzation, TODO
 
       // STEP 3: Suggest pool difficulty
-      // Disabled: many Decred pools return error object for this method and
-      // the old checkError() null-deref'd on {"error":{"code":20,...}}.
-      // Pool sets difficulty via mining.set_difficulty (suprnova uses 1 on low port).
-      // tx_suggest_difficulty(client, currentPoolDifficulty);
+      tx_suggest_difficulty(client, currentPoolDifficulty);
 
       isMinerSuscribed=true;
       uint32_t time_now = millis();
@@ -380,7 +359,6 @@ void runStratumWorker(void *name) {
                                           //Prepare data for new jobs
                                           mMiner=calculateMiningData(mWorker, mJob);
 
-                                          if (!mMiner.is_decred) {
                                           memset(mMiner.bytearray_blockheader+80, 0, 128-80);
                                           mMiner.bytearray_blockheader[80] = 0x80;
                                           mMiner.bytearray_blockheader[126] = 0x02;
@@ -388,11 +366,6 @@ void runStratumWorker(void *name) {
 
                                           nerd_mids(diget_mid, mMiner.bytearray_blockheader);
                                           nerd_sha256_bake(diget_mid, mMiner.bytearray_blockheader+64, bake);
-                                          } else {
-                                          Serial.println("    [DECRED] BLAKE3 job ready, skipping SHA256 midstate");
-                                          memset(diget_mid, 0, sizeof(diget_mid));
-                                          memset(bake, 0, sizeof(bake));
-                                          }
 
                                           #ifdef HARDWARE_SHA265
                                           #if defined(CONFIG_IDF_TARGET_ESP32S2) || defined(CONFIG_IDF_TARGET_ESP32S3) || defined(CONFIG_IDF_TARGET_ESP32C3)
@@ -425,7 +398,7 @@ void runStratumWorker(void *name) {
                                             for (int i = 0; i < 4; ++ i)
                                             {
                                               #if 1
-                                              JobPush( s_job_request_list_sw, job_pool, nonce_pool, NONCE_PER_JOB_SW, currentPoolDifficulty, mMiner.bytearray_blockheader, diget_mid, bake, mMiner.is_decred ? mMiner.decred_header : nullptr);
+                                              JobPush( s_job_request_list_sw, job_pool, nonce_pool, NONCE_PER_JOB_SW, currentPoolDifficulty, mMiner.bytearray_blockheader, diget_mid, bake);
                                               #ifdef RANDOM_NONCE
                                               nonce_pool = RandomGet() & RANDOM_NONCE_MASK;
                                               #else
@@ -545,7 +518,7 @@ void runStratumWorker(void *name) {
 #if 1
       while (s_job_request_list_sw.size() < 4)
       {
-        JobPush( s_job_request_list_sw, job_pool, nonce_pool, NONCE_PER_JOB_SW, currentPoolDifficulty, mMiner.bytearray_blockheader, diget_mid, bake, mMiner.is_decred ? mMiner.decred_header : nullptr);
+        JobPush( s_job_request_list_sw, job_pool, nonce_pool, NONCE_PER_JOB_SW, currentPoolDifficulty, mMiner.bytearray_blockheader, diget_mid, bake);
         #ifdef RANDOM_NONCE
         nonce_pool = RandomGet() & RANDOM_NONCE_MASK;
         #else
@@ -613,14 +586,12 @@ void runStratumWorker(void *name) {
 void minerWorkerSw(void * task_id)
 {
   unsigned int miner_id = (uint32_t)task_id;
-  Serial.printf("[MINER] %d Started minerWorkerSw (SHA256d) Task on core %d!\n", miner_id, xPortGetCoreID());
+  Serial.printf("[MINER] %d Started minerWorkerSw Task!\n", miner_id);
 
   std::shared_ptr<JobRequest> job;
   std::shared_ptr<JobResult> result;
   uint8_t hash[32];
-  uint8_t header[180];
   uint32_t wdt_counter = 0;
-
   while (1)
   {
     {
@@ -646,56 +617,24 @@ void minerWorkerSw(void * task_id)
       result->id = job->id;
       result->nonce_count = job->nonce_count;
       uint8_t job_in_work = job->id & 0xFF;
-
-      if (job->is_decred) {
-        // Template once; only mutate Nonce @176 and ExtraData[0] for core id
-        memcpy(header, job->decred_header, 180);
-        header[140] = (uint8_t)miner_id;  // core id in ExtraData so pools can distinguish
-        for (uint32_t n = 0; n < job->nonce_count; ++n)
+      for (uint32_t n = 0; n < job->nonce_count; ++n)
+      {
+        ((uint32_t*)(job->sha_buffer+64+12))[0] = job->nonce_start+n;
+        if (nerd_sha256d_baked(job->midstate, job->sha_buffer+64, job->bake, hash))
         {
-          uint32_t nonce = job->nonce_start + n;
-          // Official wire Nonce field (LE) at offset 176
-          header[176] = (uint8_t)(nonce);
-          header[177] = (uint8_t)(nonce >> 8);
-          header[178] = (uint8_t)(nonce >> 16);
-          header[179] = (uint8_t)(nonce >> 24);
-
-          decred_blake3_pow_hash_raw(header, hash);
-
           double diff_hash = diff_from_target(hash);
           if (diff_hash > result->difficulty)
           {
             result->difficulty = diff_hash;
-            result->nonce = nonce;
+            result->nonce = job->nonce_start+n;
             memcpy(result->hash, hash, 32);
           }
-
-          if ((uint16_t)(n & 0xFF) == 0 && s_working_current_job_id != job_in_work)
-          {
-            result->nonce_count = n + 1;
-            break;
-          }
         }
-      } else {
-        // Legacy Bitcoin SHA256d path (kept for compile safety; not used when is_decred)
-        for (uint32_t n = 0; n < job->nonce_count; ++n)
+
+        if ( (uint16_t)(n & 0xFF) == 0 &&s_working_current_job_id != job_in_work)
         {
-          ((uint32_t*)(job->sha_buffer+64+12))[0] = job->nonce_start+n;
-          if (nerd_sha256d_baked(job->midstate, job->sha_buffer+64, job->bake, hash))
-          {
-            double diff_hash = diff_from_target(hash);
-            if (diff_hash > result->difficulty)
-            {
-              result->difficulty = diff_hash;
-              result->nonce = job->nonce_start+n;
-              memcpy(result->hash, hash, 32);
-            }
-          }
-          if ((uint16_t)(n & 0xFF) == 0 && s_working_current_job_id != job_in_work)
-          {
-            result->nonce_count = n+1;
-            break;
-          }
+          result->nonce_count = n+1;
+          break;
         }
       }
     } else
