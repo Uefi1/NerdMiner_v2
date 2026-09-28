@@ -5,13 +5,13 @@
 #define MAX_NONCE_STEP  5000000U
 #define MAX_NONCE       25000000U
 #define TARGET_NONCE    471136297U
-// Very low default so ESP32 (~70 kH/s) can actually find shares on Decred pools
-#define DEFAULT_DIFFICULTY  0.00001
+// Bitcoin pool default difficulty (NerdMiner original)
+#define DEFAULT_DIFFICULTY  0.00015
 #define KEEPALIVE_TIME_ms       30000
 #define POOLINACTIVITY_TIME_ms  60000
 
-// BLAKE3 / Decred — no hardware SHA path
-//#define HARDWARE_SHA265
+// SHA256d with ESP32 hardware SHA (max hashrate path)
+#define HARDWARE_SHA265
 
 #define TARGET_BUFFER_SIZE 64
 #define DECRED_HEADER_LEN  180

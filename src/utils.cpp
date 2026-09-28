@@ -196,6 +196,8 @@ miner_data calculateMiningData(mining_subscribe& mWorker, mining_job mJob){
   // Detect "getwork-over-stratum" style notify used by Decred pools
   // (suprnova, yiimp-decred, dcrpool-compatible): coinb1 is a long header chunk
   // rather than a short Bitcoin coinbase prefix.
+  // SHA256d mode: skip Decred/BLAKE3 path entirely
+#ifndef HARDWARE_SHA265
   if (mJob.coinb1.length() >= 200) {
     mMiner.is_decred = true;
     Serial.println("    [DECRED] Building 180-byte BLAKE3 header from notify");
@@ -259,6 +261,7 @@ miner_data calculateMiningData(mining_subscribe& mWorker, mining_job mJob){
     Serial.println();
     return mMiner;
   }
+#endif // !HARDWARE_SHA265
 
   // ---------- Bitcoin SHA256d path (original) ----------
   // calculate target - target = (nbits[2:]+'00'*(int(nbits[:2],16) - 3)).zfill(64)

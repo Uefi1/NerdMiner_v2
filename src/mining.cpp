@@ -613,7 +613,7 @@ void runStratumWorker(void *name) {
 void minerWorkerSw(void * task_id)
 {
   unsigned int miner_id = (uint32_t)task_id;
-  Serial.printf("[MINER] %d Started minerWorkerSw (BLAKE3/Decred) Task on core %d!\n", miner_id, xPortGetCoreID());
+  Serial.printf("[MINER] %d Started minerWorkerSw (SHA256d) Task on core %d!\n", miner_id, xPortGetCoreID());
 
   std::shared_ptr<JobRequest> job;
   std::shared_ptr<JobResult> result;

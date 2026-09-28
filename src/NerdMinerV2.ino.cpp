@@ -3,6 +3,9 @@
 
 #include <Arduino.h>
 #include <WiFi.h>
+#if defined(CONFIG_BT_ENABLED)
+#include "esp_bt.h"
+#endif
 #include <WebServer.h>
 #include <esp_task_wdt.h>
 #include <OneButton.h>
@@ -59,6 +62,11 @@ const char* ntpServer = "pool.ntp.org";
 /********* INIT *****/
 void setup()
 {
+  // Free RAM/CPU: Bluetooth not used by miner
+#if defined(CONFIG_BT_ENABLED)
+  btStop();
+#endif
+
       //Init pin 15 to eneble 5V external power (LilyGo bug)
       //Also used as power-hold latch on M5StickC Plus2 (GPIO4)
   #ifdef PIN_ENABLE5V
@@ -160,29 +168,16 @@ void setup()
   //BaseType_t res = xTaskCreate(runWorker, name, 35000, (void*)name, 1, NULL);
   TaskHandle_t minerTask1, minerTask2 = NULL;
   #ifdef HARDWARE_SHA265
-    #if defined(CONFIG_IDF_TARGET_ESP32)
-    xTaskCreate(minerWorkerHw, "MinerHw-0", 3584, (void*)0, 3, &minerTask1); // Reduced for ESP32 classic
-    //xTaskCreate(minerWorkerSw, "MinerSw-0", 8192, (void*)0, 1, &minerTask1); // Reduced for ESP32 classic
-    #else
-    xTaskCreate(minerWorkerHw, "MinerHw-0", 4096, (void*)0, 3, &minerTask1);
-    #endif
+    // HW SHA256d on CORE 0 (dedicated — max hashrate)
+    xTaskCreatePinnedToCore(minerWorkerHw, "MinerHw-0", 4096, (void*)0, 3, &minerTask1, 0);
   #else
-    // Pin miner 0 to CORE 0 (pure mining, no WiFi/stratum)
-    #if defined(CONFIG_IDF_TARGET_ESP32)
     xTaskCreatePinnedToCore(minerWorkerSw, "MinerSw-0", 8192, (void*)0, 3, &minerTask1, 0);
-    #else
-    xTaskCreatePinnedToCore(minerWorkerSw, "MinerSw-0", 8192, (void*)0, 3, &minerTask1, 0);
-    #endif
   #endif
   esp_task_wdt_add(minerTask1);
 
 #if (SOC_CPU_CORES_NUM >= 2)
-  // Pin miner 1 to CORE 1 (shares with stratum/monitor — still needed for dual-core HR)
-  #if defined(CONFIG_IDF_TARGET_ESP32)
-  xTaskCreatePinnedToCore(minerWorkerSw, "MinerSw-1", 8192, (void*)1, 2, &minerTask2, 1);
-  #else
-  xTaskCreatePinnedToCore(minerWorkerSw, "MinerSw-1", 8192, (void*)1, 2, &minerTask2, 1);
-  #endif
+  // Soft SHA256d on CORE 1 (fills leftover cycles next to stratum)
+  xTaskCreatePinnedToCore(minerWorkerSw, "MinerSw-1", 8192, (void*)1, 3, &minerTask2, 1);
   esp_task_wdt_add(minerTask2);
 #endif
 
