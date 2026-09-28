@@ -23,7 +23,7 @@
 #include "i2c_master.h"
 
 //10 Jobs per second
-#define NONCE_PER_JOB_SW 4096
+#define NONCE_PER_JOB_SW 8192
 #define NONCE_PER_JOB_HW 16*1024
 
 //#define I2C_SLAVE
@@ -648,18 +648,17 @@ void minerWorkerSw(void * task_id)
       uint8_t job_in_work = job->id & 0xFF;
 
       if (job->is_decred) {
+        // Template once; only mutate Nonce @176 and ExtraData[0] for core id
         memcpy(header, job->decred_header, 180);
-        // nonce lives in extra_data[0..7] at offset 140 (LE uint64). We use lower 32 bits from job nonce range.
+        header[140] = (uint8_t)miner_id;  // core id in ExtraData so pools can distinguish
         for (uint32_t n = 0; n < job->nonce_count; ++n)
         {
           uint32_t nonce = job->nonce_start + n;
-          // write 4-byte LE nonce into extra_data[0..3]; keep upper bytes from template
-          header[140] = (uint8_t)(nonce);
-          header[141] = (uint8_t)(nonce >> 8);
-          header[142] = (uint8_t)(nonce >> 16);
-          header[143] = (uint8_t)(nonce >> 24);
-          // upper 4 bytes of 8-byte field: stamp with miner_id so cores don't collide
-          header[144] = (uint8_t)miner_id;
+          // Official wire Nonce field (LE) at offset 176
+          header[176] = (uint8_t)(nonce);
+          header[177] = (uint8_t)(nonce >> 8);
+          header[178] = (uint8_t)(nonce >> 16);
+          header[179] = (uint8_t)(nonce >> 24);
 
           decred_blake3_pow_hash_raw(header, hash);
 
