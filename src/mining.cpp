@@ -4,7 +4,10 @@
 #include <esp_task_wdt.h>
 #include <nvs_flash.h>
 #include <nvs.h>
-//#include "ShaTests/nerdSHA256.h"
+// BLAKE3 / Decred PoW (replaces SHA256d)
+#include "blake3/decred_blake3_pow.h"
+#include "blake3/blake3.h"
+// keep sha headers so any residual references still compile if ifdef'd out
 #include "ShaTests/nerdSHA256plus.h"
 #include "stratum.h"
 #include "mining.h"
@@ -148,6 +151,9 @@ struct JobRequest
   uint8_t sha_buffer[128];
   uint32_t midstate[8];
   uint32_t bake[16];
+  // Decred / BLAKE3: full 180-byte serialized header; nonce at offset 140 (8 bytes LE)
+  uint8_t decred_header[180];
+  bool is_decred;
 };
 
 struct JobResult
@@ -168,16 +174,27 @@ std::list<std::shared_ptr<JobResult>> s_job_result_list;
 static volatile uint8_t s_working_current_job_id = 0xFF;
 
 static void JobPush(std::list<std::shared_ptr<JobRequest>> &job_list,  uint32_t id, uint32_t nonce_start, uint32_t nonce_count, double difficulty,
-                    const uint8_t* sha_buffer, const uint32_t* midstate, const uint32_t* bake)
+                    const uint8_t* sha_buffer, const uint32_t* midstate, const uint32_t* bake,
+                    const uint8_t* decred_header = nullptr)
 {
   std::shared_ptr<JobRequest> job = std::make_shared<JobRequest>();
   job->id = id;
   job->nonce_start = nonce_start;
   job->nonce_count = nonce_count;
   job->difficulty = difficulty;
-  memcpy(job->sha_buffer, sha_buffer, sizeof(job->sha_buffer));
-  memcpy(job->midstate, midstate, sizeof(job->midstate));
-  memcpy(job->bake, bake, sizeof(job->bake));
+  if (sha_buffer) memcpy(job->sha_buffer, sha_buffer, sizeof(job->sha_buffer));
+  else memset(job->sha_buffer, 0, sizeof(job->sha_buffer));
+  if (midstate) memcpy(job->midstate, midstate, sizeof(job->midstate));
+  else memset(job->midstate, 0, sizeof(job->midstate));
+  if (bake) memcpy(job->bake, bake, sizeof(job->bake));
+  else memset(job->bake, 0, sizeof(job->bake));
+  if (decred_header) {
+    memcpy(job->decred_header, decred_header, 180);
+    job->is_decred = true;
+  } else {
+    memset(job->decred_header, 0, 180);
+    job->is_decred = false;
+  }
   job_list.push_back(job);
 }
 
@@ -359,6 +376,7 @@ void runStratumWorker(void *name) {
                                           //Prepare data for new jobs
                                           mMiner=calculateMiningData(mWorker, mJob);
 
+                                          if (!mMiner.is_decred) {
                                           memset(mMiner.bytearray_blockheader+80, 0, 128-80);
                                           mMiner.bytearray_blockheader[80] = 0x80;
                                           mMiner.bytearray_blockheader[126] = 0x02;
@@ -366,6 +384,11 @@ void runStratumWorker(void *name) {
 
                                           nerd_mids(diget_mid, mMiner.bytearray_blockheader);
                                           nerd_sha256_bake(diget_mid, mMiner.bytearray_blockheader+64, bake);
+                                          } else {
+                                          Serial.println("    [DECRED] BLAKE3 job ready, skipping SHA256 midstate");
+                                          memset(diget_mid, 0, sizeof(diget_mid));
+                                          memset(bake, 0, sizeof(bake));
+                                          }
 
                                           #ifdef HARDWARE_SHA265
                                           #if defined(CONFIG_IDF_TARGET_ESP32S2) || defined(CONFIG_IDF_TARGET_ESP32S3) || defined(CONFIG_IDF_TARGET_ESP32C3)
@@ -398,7 +421,7 @@ void runStratumWorker(void *name) {
                                             for (int i = 0; i < 4; ++ i)
                                             {
                                               #if 1
-                                              JobPush( s_job_request_list_sw, job_pool, nonce_pool, NONCE_PER_JOB_SW, currentPoolDifficulty, mMiner.bytearray_blockheader, diget_mid, bake);
+                                              JobPush( s_job_request_list_sw, job_pool, nonce_pool, NONCE_PER_JOB_SW, currentPoolDifficulty, mMiner.bytearray_blockheader, diget_mid, bake, mMiner.is_decred ? mMiner.decred_header : nullptr);
                                               #ifdef RANDOM_NONCE
                                               nonce_pool = RandomGet() & RANDOM_NONCE_MASK;
                                               #else
@@ -518,7 +541,7 @@ void runStratumWorker(void *name) {
 #if 1
       while (s_job_request_list_sw.size() < 4)
       {
-        JobPush( s_job_request_list_sw, job_pool, nonce_pool, NONCE_PER_JOB_SW, currentPoolDifficulty, mMiner.bytearray_blockheader, diget_mid, bake);
+        JobPush( s_job_request_list_sw, job_pool, nonce_pool, NONCE_PER_JOB_SW, currentPoolDifficulty, mMiner.bytearray_blockheader, diget_mid, bake, mMiner.is_decred ? mMiner.decred_header : nullptr);
         #ifdef RANDOM_NONCE
         nonce_pool = RandomGet() & RANDOM_NONCE_MASK;
         #else
@@ -586,12 +609,14 @@ void runStratumWorker(void *name) {
 void minerWorkerSw(void * task_id)
 {
   unsigned int miner_id = (uint32_t)task_id;
-  Serial.printf("[MINER] %d Started minerWorkerSw Task!\n", miner_id);
+  Serial.printf("[MINER] %d Started minerWorkerSw (BLAKE3/Decred) Task on core %d!\n", miner_id, xPortGetCoreID());
 
   std::shared_ptr<JobRequest> job;
   std::shared_ptr<JobResult> result;
   uint8_t hash[32];
+  uint8_t header[180];
   uint32_t wdt_counter = 0;
+
   while (1)
   {
     {
@@ -617,24 +642,57 @@ void minerWorkerSw(void * task_id)
       result->id = job->id;
       result->nonce_count = job->nonce_count;
       uint8_t job_in_work = job->id & 0xFF;
-      for (uint32_t n = 0; n < job->nonce_count; ++n)
-      {
-        ((uint32_t*)(job->sha_buffer+64+12))[0] = job->nonce_start+n;
-        if (nerd_sha256d_baked(job->midstate, job->sha_buffer+64, job->bake, hash))
+
+      if (job->is_decred) {
+        memcpy(header, job->decred_header, 180);
+        // nonce lives in extra_data[0..7] at offset 140 (LE uint64). We use lower 32 bits from job nonce range.
+        for (uint32_t n = 0; n < job->nonce_count; ++n)
         {
+          uint32_t nonce = job->nonce_start + n;
+          // write 4-byte LE nonce into extra_data[0..3]; keep upper bytes from template
+          header[140] = (uint8_t)(nonce);
+          header[141] = (uint8_t)(nonce >> 8);
+          header[142] = (uint8_t)(nonce >> 16);
+          header[143] = (uint8_t)(nonce >> 24);
+          // upper 4 bytes of 8-byte field: stamp with miner_id so cores don't collide
+          header[144] = (uint8_t)miner_id;
+
+          decred_blake3_pow_hash_raw(header, hash);
+
           double diff_hash = diff_from_target(hash);
           if (diff_hash > result->difficulty)
           {
             result->difficulty = diff_hash;
-            result->nonce = job->nonce_start+n;
+            result->nonce = nonce;
             memcpy(result->hash, hash, 32);
           }
-        }
 
-        if ( (uint16_t)(n & 0xFF) == 0 &&s_working_current_job_id != job_in_work)
+          if ((uint16_t)(n & 0xFF) == 0 && s_working_current_job_id != job_in_work)
+          {
+            result->nonce_count = n + 1;
+            break;
+          }
+        }
+      } else {
+        // Legacy Bitcoin SHA256d path (kept for compile safety; not used when is_decred)
+        for (uint32_t n = 0; n < job->nonce_count; ++n)
         {
-          result->nonce_count = n+1;
-          break;
+          ((uint32_t*)(job->sha_buffer+64+12))[0] = job->nonce_start+n;
+          if (nerd_sha256d_baked(job->midstate, job->sha_buffer+64, job->bake, hash))
+          {
+            double diff_hash = diff_from_target(hash);
+            if (diff_hash > result->difficulty)
+            {
+              result->difficulty = diff_hash;
+              result->nonce = job->nonce_start+n;
+              memcpy(result->hash, hash, 32);
+            }
+          }
+          if ((uint16_t)(n & 0xFF) == 0 && s_working_current_job_id != job_in_work)
+          {
+            result->nonce_count = n+1;
+            break;
+          }
         }
       }
     } else
