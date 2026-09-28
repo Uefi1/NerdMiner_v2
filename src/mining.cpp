@@ -122,9 +122,10 @@ bool checkPoolInactivity(unsigned int keepAliveTime, unsigned long inactivityTim
     if ( time_now > mLastTXtoPool + keepAliveTime)
     {
       mLastTXtoPool = time_now;
-      Serial.println("  Sending  : KeepAlive suggest_difficulty");
-      //if (client.print("{}\n") == 0) {
-      tx_suggest_difficulty(client, DEFAULT_DIFFICULTY);
+      Serial.println("  Sending  : KeepAlive");
+      client.print("{}\n");
+      // Decred pools (suprnova) do not support mining.suggest_difficulty
+      // tx_suggest_difficulty(client, DEFAULT_DIFFICULTY);
       /*if(tx_suggest_difficulty(client, DEFAULT_DIFFICULTY)){
         Serial.println("  Sending keepAlive to pool -> Detected client disconnected");
         return true;
@@ -306,7 +307,10 @@ void runStratumWorker(void *name) {
       //tx_mining_auth2(client, mWorker.wName, mWorker.wPass); //Don't verifies authoritzation, TODO
 
       // STEP 3: Suggest pool difficulty
-      tx_suggest_difficulty(client, currentPoolDifficulty);
+      // Disabled: many Decred pools return error object for this method and
+      // the old checkError() null-deref'd on {"error":{"code":20,...}}.
+      // Pool sets difficulty via mining.set_difficulty (suprnova uses 1 on low port).
+      // tx_suggest_difficulty(client, currentPoolDifficulty);
 
       isMinerSuscribed=true;
       uint32_t time_now = millis();
