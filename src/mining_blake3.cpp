@@ -230,7 +230,10 @@ void minerWorkerBlake3(void *task_id) {
                 decred_blake3_pow_hash_raw(work_buf, hash);
 
                 double d = blake3HashDifficulty(hash);
-                if (d >= job->pool_difficulty) {
+                // Require hash[31]==0 so we don't spam the pool when it sets
+                // difficulty=1 (Suprnova default).  Real target math would be
+                // better; this is a practical rate limit for ESP32 hashrate.
+                if (hash[31] == 0 && d >= job->pool_difficulty) {
                     auto res = std::make_shared<Blake3JobResult>();
                     res->job_serial = job->job_serial;
                     res->found_share = true;
@@ -333,7 +336,11 @@ void runStratumWorkerBlake3(void *name) {
                               mWorker.extranonce2.c_str(), mWorker.extranonce2_size);
             }
             tx_mining_auth(s_blake3_client, mWorker.wName, mWorker.wPass);
-            tx_suggest_difficulty(s_blake3_client, currentPoolDifficulty);
+            // Suprnova (and many Decred pools) do NOT implement
+            // mining.suggest_difficulty -- sending it only produces
+            // {"error":{"code":20,"message":"Unknown method:..."}} noise.
+            // Rely on mining.set_difficulty from the pool instead.
+            // tx_suggest_difficulty(s_blake3_client, currentPoolDifficulty);
             s_blake3_subscribed = true;
             last_job_time = millis();
         }
@@ -371,13 +378,31 @@ void runStratumWorkerBlake3(void *name) {
                     s_blake3_subscribed = false;
                     break;
                 }
-                unsigned long submit_id = 0;
-                Serial.printf("[BLAKE3-WORKER] Submitting share, nonce=%08x diff=%.4f en2=%s\n",
-                              r->nonce, r->share_difficulty, mWorker.extranonce2.c_str());
-                tx_mining_submit(s_blake3_client, mWorker, mJob, r->nonce, submit_id);
+                // CRITICAL: String(nonce, HEX) drops leading zeros → pool
+                // replies "Invalid nonce". Decred (and ckpool/Bitcoin) need
+                // a fixed 8-char lowercase hex nonce field.
+                char nonceHex[9];
+                snprintf(nonceHex, sizeof(nonceHex), "%08x", (unsigned)r->nonce);
+
+                // Build submit ourselves so we control nonce formatting.
+                // Same param order as tx_mining_submit: worker, jobId, en2, ntime, nonce
+                static unsigned long submit_id_ctr = 100;
+                submit_id_ctr++;
+                char payload[512];
+                snprintf(payload, sizeof(payload),
+                    "{\"id\":%lu,\"method\":\"mining.submit\",\"params\":[\"%s\",\"%s\",\"%s\",\"%s\",\"%s\"]}\n",
+                    submit_id_ctr,
+                    mWorker.wName,
+                    mJob.job_id.c_str(),
+                    mWorker.extranonce2.c_str(),
+                    mJob.ntime.c_str(),
+                    nonceHex);
+                Serial.printf("[BLAKE3-WORKER] Submitting share, nonce=%s diff=%.4f en2=%s\n",
+                              nonceHex, r->share_difficulty, mWorker.extranonce2.c_str());
+                Serial.print("  Sending  : "); Serial.print(payload);
+                s_blake3_client.print(payload);
                 shares++;
-                // Brief pause so the TCP stack can flush and the pool can reply
-                vTaskDelay(30 / portTICK_PERIOD_MS);
+                vTaskDelay(40 / portTICK_PERIOD_MS);
             }
         }
 
