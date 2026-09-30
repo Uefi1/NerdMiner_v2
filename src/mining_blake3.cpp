@@ -16,7 +16,7 @@
 //     - params[3]/[4] (coinb2/merkle_branch) are NOT used for Decred
 //   nonce (searched by the worker tasks)      -> byte offset 140
 //   extraNonce1 (from subscribe response)     -> byte offset 144
-//   extraNonce2 (mWorker.extranonce2, fixed)  -> byte offset 152
+//   extraNonce2 (mWorker.extranonce2, fixed)  -> byte offset 148
 //   timestamp (params[7], ntime)              -> byte offset 136
 //   submit params = [wallet, jobId, extranonce2, ntime, nonceHex]
 //     -- this is exactly what the existing tx_mining_submit() already sends,
@@ -152,12 +152,23 @@ static bool buildBlake3WorkData(const mining_subscribe &mWorker,
         return false;
     }
 
+    // Full 180-byte Decred header layout (DCP0011 / gominer):
+    //   [0..3]   version
+    //   [4..35]  prev_block_hash
+    //   [36..179] partial header from coinb1 (merkle..stakeVersion)
+    //             which already contains ntime at [136..139]
+    //   nonce      @ 140  (4 bytes, LE)  — rolled by worker
+    //   extranonce1@ 144  (4 bytes)      — from subscribe
+    //   extranonce2@ 148  (4 bytes)      — miner-chosen (was wrongly @152)
     size_t off = 0;
     memcpy(out_work_data + off, block_version, 4);  off += 4;
     memcpy(out_work_data + off, prev_hash, 32);      off += 32;
     memcpy(out_work_data + off, partial_header, 144); // off -> 180
 
-    // extraNonce1 (pool-assigned at subscribe time) -> offset 144, up to 4 bytes
+    // Zero the nonce slot; worker fills it while hashing
+    memset(out_work_data + 140, 0, 4);
+
+    // extraNonce1 @ 144
     uint8_t en1[4] = {0, 0, 0, 0};
     size_t en1_len = mWorker.extranonce1.length() / 2;
     if (en1_len > 4) en1_len = 4;
@@ -167,27 +178,20 @@ static bool buildBlake3WorkData(const mining_subscribe &mWorker,
     }
     memcpy(out_work_data + 144, en1, 4);
 
-    // extraNonce2 (this project keeps it fixed at 1, see calculateMiningData
-    // in utils.cpp for the SHA256d equivalent of this same convention) ->
-    // offset 152, up to 4 bytes.
+    // extraNonce2 @ 148 (NOT 152 — that was 4 bytes too far and produced
+    // hashes the pool could not reproduce → "Low diff: 0.00")
     uint8_t en2[4] = {0, 0, 0, 0};
     size_t en2_len = mWorker.extranonce2.length() / 2;
-    if (en2_len > 4) en2_len = 4; // NOTE: if a pool advertises extranonce2_size
-                                  // > 4 bytes, only the low 4 bytes fit this
-                                  // slot -- flagged rather than silently
-                                  // truncated without a trace.
+    if (en2_len > 4) en2_len = 4;
     for (size_t i = 0; i < en2_len; i++) {
         char b[3] = { mWorker.extranonce2[2*i], mWorker.extranonce2[2*i+1], 0 };
         en2[i] = (uint8_t)strtoul(b, nullptr, 16);
     }
-    memcpy(out_work_data + 152, en2, 4);
+    memcpy(out_work_data + 148, en2, 4);
 
-    // timestamp (ntime) -> offset 136, little-endian
-    uint32_t ts = (uint32_t)strtoul(mJob.ntime.c_str(), nullptr, 16);
-    out_work_data[136] = (uint8_t)(ts & 0xff);
-    out_work_data[137] = (uint8_t)((ts >> 8) & 0xff);
-    out_work_data[138] = (uint8_t)((ts >> 16) & 0xff);
-    out_work_data[139] = (uint8_t)((ts >> 24) & 0xff);
+    // Do NOT rewrite timestamp: coinb1 already carries the pool ntime at
+    // offset 136.  strtoul+LE rewrite was byte-swapping it vs what the pool
+    // reconstructs from the ntime string in mining.submit.
 
     return true;
 }
