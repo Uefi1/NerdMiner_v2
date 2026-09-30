@@ -14,13 +14,12 @@
 //     - params[2] (coinb1) -> the 144-byte partial header (offset 36..180)
 //     - params[5] (version)-> block version
 //     - params[3]/[4] (coinb2/merkle_branch) are NOT used for Decred
-//   nonce (searched by the worker tasks)      -> byte offset 140
-//   extraNonce1 (from subscribe response)     -> byte offset 144
-//   extraNonce2 (mWorker.extranonce2, fixed)  -> byte offset 148
-//   timestamp (params[7], ntime)              -> byte offset 136
+//   nonce (searched by the worker tasks)      -> byte offset 140 (LE)
+//   extraData / extranonce2 from submit       -> byte offset 144
+//     Yiimp/Suprnova create_decred_header only binlify(nonce2) into extra[].
+//     Do NOT write pool extranonce1 into the header — pool does not.
+//   timestamp already in coinb1 @136
 //   submit params = [wallet, jobId, extranonce2, ntime, nonceHex]
-//     -- this is exactly what the existing tx_mining_submit() already sends,
-//        unmodified.
 
 #include <Arduino.h>
 #include <WiFi.h>
@@ -131,6 +130,13 @@ static bool hexToBytesFixed(const String &hex, uint8_t *out, size_t out_len) {
 static bool buildBlake3WorkData(const mining_subscribe &mWorker,
                                  const mining_job &mJob,
                                  uint8_t out_work_data[192]) {
+    // Yiimp/Suprnova Decred header reconstruction (create_decred_header):
+    //   memcpy(template);  sscanf(nonce);  binlify(extra, nonce2_from_submit);
+    // Pool does NOT inject extranonce1 into the header on submit validation.
+    // So we must hash the same layout: version|prevhash|coinb1, nonce rolled
+    // at offset 140, and extra[32] filled ONLY from the extranonce2 we will
+    // put in mining.submit (zeros for size=4). Writing en1 here caused every
+    // share to hash differently from the pool → "Low diff: 0.00".
     memset(out_work_data, 0, 192);
 
     uint8_t block_version[4];
@@ -138,48 +144,29 @@ static bool buildBlake3WorkData(const mining_subscribe &mWorker,
     uint8_t partial_header[144];
 
     if (!hexToBytesFixed(mJob.version, block_version, 4)) {
-        Serial.println("[BLAKE3] version field is not 4 bytes -- unexpected job format");
+        Serial.println("[BLAKE3] version field is not 4 bytes");
         return false;
     }
     if (!hexToBytesFixed(mJob.prev_block_hash, prev_hash, 32)) {
-        Serial.println("[BLAKE3] prev_block_hash field is not 32 bytes -- unexpected job format");
+        Serial.println("[BLAKE3] prev_block_hash field is not 32 bytes");
         return false;
     }
     if (!hexToBytesFixed(mJob.coinb1, partial_header, 144)) {
-        Serial.printf("[BLAKE3] coinb1 is %d bytes, expected 144 -- this pool's "
-                       "job format doesn't match Decred/DCP0011. Not mining this job.\n",
+        Serial.printf("[BLAKE3] coinb1 is %d bytes, expected 144\n",
                        (int)(mJob.coinb1.length() / 2));
         return false;
     }
 
-    // Full 180-byte Decred header layout (DCP0011 / gominer):
-    //   [0..3]   version
-    //   [4..35]  prev_block_hash
-    //   [36..179] partial header from coinb1 (merkle..stakeVersion)
-    //             which already contains ntime at [136..139]
-    //   nonce      @ 140  (4 bytes, LE)  — rolled by worker
-    //   extranonce1@ 144  (4 bytes)      — from subscribe
-    //   extranonce2@ 148  (4 bytes)      — miner-chosen (was wrongly @152)
-    size_t off = 0;
-    memcpy(out_work_data + off, block_version, 4);  off += 4;
-    memcpy(out_work_data + off, prev_hash, 32);      off += 32;
-    memcpy(out_work_data + off, partial_header, 144); // off -> 180
+    memcpy(out_work_data + 0,  block_version, 4);
+    memcpy(out_work_data + 4,  prev_hash, 32);
+    memcpy(out_work_data + 36, partial_header, 144); // through stake version @176
 
-    // Zero the nonce slot; worker fills it while hashing
+    // Nonce @140: zero; worker writes LE uint32 while hashing
     memset(out_work_data + 140, 0, 4);
 
-    // extraNonce1 @ 144
-    uint8_t en1[4] = {0, 0, 0, 0};
-    size_t en1_len = mWorker.extranonce1.length() / 2;
-    if (en1_len > 4) en1_len = 4;
-    for (size_t i = 0; i < en1_len; i++) {
-        char b[3] = { mWorker.extranonce1[2*i], mWorker.extranonce1[2*i+1], 0 };
-        en1[i] = (uint8_t)strtoul(b, nullptr, 16);
-    }
-    memcpy(out_work_data + 144, en1, 4);
-
-    // extraNonce2 @ 148 (NOT 152 — that was 4 bytes too far and produced
-    // hashes the pool could not reproduce → "Low diff: 0.00")
+    // ExtraData @144 (32 bytes): only what we will send as extranonce2.
+    // Subscribe advertised size=4 → keep 4 zero bytes (and rest already 0
+    // from coinb1 / memset).  Do NOT write memcpy(en1) here.
     uint8_t en2[4] = {0, 0, 0, 0};
     size_t en2_len = mWorker.extranonce2.length() / 2;
     if (en2_len > 4) en2_len = 4;
@@ -187,26 +174,14 @@ static bool buildBlake3WorkData(const mining_subscribe &mWorker,
         char b[3] = { mWorker.extranonce2[2*i], mWorker.extranonce2[2*i+1], 0 };
         en2[i] = (uint8_t)strtoul(b, nullptr, 16);
     }
-    memcpy(out_work_data + 148, en2, 4);
+    memcpy(out_work_data + 144, en2, 4);
 
-    // Timestamp @ 136: MUST match what the pool writes when it validates
-    // mining.submit (it overwrites this field with the ntime param).
-    // Write the ntime hex string as raw bytes (same order as the hex
-    // digits), identical to how extranonce1 is applied — not strtoul+LE,
-    // which byte-swaps and desyncs from coinb1 / pool reconstruction.
-    // Result of mismatch: pool reports "Low diff: 0.00".
-    {
-        const String &nt = mJob.ntime;
-        if (nt.length() >= 8) {
-            for (int i = 0; i < 4; i++) {
-                char b[3] = { nt[2*i], nt[2*i+1], 0 };
-                out_work_data[136 + i] = (uint8_t)strtoul(b, nullptr, 16);
-            }
-        }
-    }
+    // ntime already present in coinb1 at offset 136 — leave it.
+    // (verified: coinb1[100..103] == notify ntime hex bytes)
 
     return true;
 }
+
 
 // ---------------------------------------------------------------------
 // Dual-core hashing worker. Launch this twice (once per core) exactly the
