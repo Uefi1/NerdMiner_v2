@@ -1,35 +1,27 @@
-# BLAKE3 / Decred patch v5 (yiimp/Suprnova semantics)
+# BLAKE3 / Decred patch v6
 
-## Root cause of persistent "Low diff: 0.00"
+## Root cause (confirmed from yiimp source)
 
-Suprnova runs yiimp-style Decred stratum. On share validation
-(`create_decred_header`) the pool builds the header as:
+`job_mining_notify_buffer` sends `templ->prevhash_be` in mining.notify.
+Pool share validation uses the binary template where prevhash is in
+**internal** byte order.
 
-```
-memcpy(template_from_job);
-sscanf(nonce_from_submit);   // LE uint32 @ offset 140
-binlify(extra, nonce2_from_submit);  // ONLY extranonce2 → offset 144
-```
+We were writing the BE form into the header → BLAKE3 never matched →
+`Low diff: 0.00`.
 
-It does **not** put extranonce1 into the header. Our miner was writing
-en1 at offset 144, so local BLAKE3 ≠ pool BLAKE3 → difficulty 0.00.
+## Fix
 
-## Fix (v5)
+Word-swap (swab32 each 4-byte group) of prevhash when building the
+180-byte header — same as ccminer ALGO_DECRED.
 
-- Header = version + prevhash + coinb1 (ntime already correct inside)
-- Nonce @140 rolled LE
-- Extra @144 = only extranonce2 (zeros, size=4)
-- No en1 memcpy
-- 8-char padded nonce in submit
-- Stack 12288, no suggest_difficulty, share filter
+Also retained from earlier patches:
+- no en1 in header (yiimp only binlify nonce2 into extra)
+- LE nonce @140, padded 8-char submit
+- stack 12288, etc.
 
 ## Apply
 
-```
 src/NerdMinerV2.ino.cpp
 src/mining_blake3.cpp
-```
 
-Rebuild `-D NERDMINER_BLAKE3=1`.
-
-Expect `"result":true` or a non-zero difficulty reject.
+Rebuild with -D NERDMINER_BLAKE3=1

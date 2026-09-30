@@ -158,7 +158,18 @@ static bool buildBlake3WorkData(const mining_subscribe &mWorker,
     }
 
     memcpy(out_work_data + 0,  block_version, 4);
-    memcpy(out_work_data + 4,  prev_hash, 32);
+
+    // Yiimp notify sends templ->prevhash_be (display/BE form).
+    // Binary header template stores prevhash in internal order.
+    // ccminer Decred: swab32 each 4-byte word of stratum prevhash.
+    // Without this every share hashes differently from the pool → Low diff 0.00.
+    for (int w = 0; w < 8; w++) {
+        out_work_data[4 + w*4 + 0] = prev_hash[w*4 + 3];
+        out_work_data[4 + w*4 + 1] = prev_hash[w*4 + 2];
+        out_work_data[4 + w*4 + 2] = prev_hash[w*4 + 1];
+        out_work_data[4 + w*4 + 3] = prev_hash[w*4 + 0];
+    }
+
     memcpy(out_work_data + 36, partial_header, 144); // through stake version @176
 
     // Nonce @140: zero; worker writes LE uint32 while hashing
