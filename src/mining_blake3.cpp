@@ -26,12 +26,14 @@
 #include <mutex>
 #include <list>
 #include <map>
+#include <set>
 #include <memory>
 #include <esp_task_wdt.h>
 
 #include "stratum.h"
 #include "mining.h"
 #include "mining_blake3.h"
+#include "utils.h"
 #include "drivers/storage/storage.h"
 #include "drivers/displays/display.h"
 #include "monitor.h"
@@ -78,6 +80,9 @@ static std::list<std::shared_ptr<Blake3JobRequest>> s_blake3_requests;
 static std::list<std::shared_ptr<Blake3JobResult>>  s_blake3_results;
 static volatile uint32_t s_blake3_current_serial = 0;
 static volatile uint32_t s_blake3_nonce_cursor = 0;
+static uint8_t s_blake3_work_data[192] = {0};
+static double s_blake3_pool_difficulty = DEFAULT_DIFFICULTY;
+static std::set<unsigned long> s_blake3_pending_submit_ids;
 
 // Interprets a raw BLAKE3 hash (little-endian 256-bit) as a coarse
 // difficulty value: counts leading zero bytes/the magnitude of the first
@@ -95,22 +100,12 @@ static volatile uint32_t s_blake3_nonce_cursor = 0;
 // share can beat difficulty 1, which matches practical Stratum share rates
 // for a ~70 kH/s device.
 static double blake3HashDifficulty(const uint8_t hash[32]) {
-    // Count leading zero bytes from the most-significant end (hash[31]).
-    int leading_zeros = 0;
-    for (int i = 31; i >= 0; i--) {
-        if (hash[i] == 0) {
-            leading_zeros++;
-        } else {
-            // Fractional part from the first non-zero byte
-            double frac = 256.0 / ((double)hash[i] + 1.0);
-            // Each full zero byte multiplies difficulty by 256
-            double diff = 1.0;
-            for (int z = 0; z < leading_zeros; z++) diff *= 256.0;
-            return diff * frac;
-        }
-    }
-    // All zeros — theoretical max
-    return 1e18;
+    // Reuse the project's exact 256-bit difficulty conversion.  The old
+    // BLAKE3 code estimated difficulty from leading zero bytes, which made
+    // almost every hash with hash[31] == 0 look like a valid diff-1 share.
+    // Yiimp/Suprnova checks the full 256-bit value, so use the same
+    // little-endian interpretation here.
+    return diff_from_target((void *)hash);
 }
 
 static bool hexToBytesFixed(const String &hex, uint8_t *out, size_t out_len) {
@@ -130,13 +125,11 @@ static bool hexToBytesFixed(const String &hex, uint8_t *out, size_t out_len) {
 static bool buildBlake3WorkData(const mining_subscribe &mWorker,
                                  const mining_job &mJob,
                                  uint8_t out_work_data[192]) {
-    // Yiimp/Suprnova Decred header reconstruction (create_decred_header):
-    //   memcpy(template);  sscanf(nonce);  binlify(extra, nonce2_from_submit);
-    // Pool does NOT inject extranonce1 into the header on submit validation.
-    // So we must hash the same layout: version|prevhash|coinb1, nonce rolled
-    // at offset 140, and extra[32] filled ONLY from the extranonce2 we will
-    // put in mining.submit (zeros for size=4). Writing en1 here caused every
-    // share to hash differently from the pool → "Low diff: 0.00".
+    // Yiimp/Suprnova Decred header reconstruction:
+    //   version | prevhash | 144-byte header tail
+    // nonce is at header offset 140 and the 36-byte extra field starts at 144.
+    // The exact extranonce layout depends on the pool's subscribe response,
+    // so v7 writes extranonce1 || extranonce2 exactly as advertised.
     memset(out_work_data, 0, 192);
 
     uint8_t block_version[4];
@@ -159,15 +152,13 @@ static bool buildBlake3WorkData(const mining_subscribe &mWorker,
 
     memcpy(out_work_data + 0,  block_version, 4);
 
-    // Yiimp notify sends templ->prevhash_be (display/BE form).
-    // Binary header template stores prevhash in internal order.
-    // ccminer Decred: swab32 each 4-byte word of stratum prevhash.
-    // Without this every share hashes differently from the pool → Low diff 0.00.
-    for (int w = 0; w < 8; w++) {
-        out_work_data[4 + w*4 + 0] = prev_hash[w*4 + 3];
-        out_work_data[4 + w*4 + 1] = prev_hash[w*4 + 2];
-        out_work_data[4 + w*4 + 2] = prev_hash[w*4 + 1];
-        out_work_data[4 + w*4 + 3] = prev_hash[w*4 + 0];
+    // Yiimp sends prevhash_be, i.e. the human-readable/display form.
+    // The Decred block header stores the previous hash in internal order,
+    // which is the FULL 32-byte reverse of prevhash_be.  Swapping bytes
+    // inside each 32-bit word (the old patch) is not enough: it leaves the
+    // eight words in the wrong order and therefore hashes a different block.
+    for (int i = 0; i < 32; i++) {
+        out_work_data[4 + i] = prev_hash[31 - i];
     }
 
     memcpy(out_work_data + 36, partial_header, 144); // through stake version @176
@@ -175,17 +166,32 @@ static bool buildBlake3WorkData(const mining_subscribe &mWorker,
     // Nonce @140: zero; worker writes LE uint32 while hashing
     memset(out_work_data + 140, 0, 4);
 
-    // ExtraData @144 (32 bytes): only what we will send as extranonce2.
-    // Subscribe advertised size=4 → keep 4 zero bytes (and rest already 0
-    // from coinb1 / memset).  Do NOT write memcpy(en1) here.
-    uint8_t en2[4] = {0, 0, 0, 0};
+    // ExtraData starts at header offset 144 and is 36 bytes in DCP0011.
+    // For Stratum/Haste the pool identity is extranonce1 || extranonce2.
+    // The previous patch wrote only extranonce2, so the ESP32 hashed a
+    // different header than the pool.  This is especially important for
+    // yiimp/Suprnova: some deployments use 4+4 bytes, while yiimp's
+    // Decred-specific path can use 24+12 bytes.  Both fit exactly here.
+    uint8_t extra[36] = {0};
+    size_t en1_len = mWorker.extranonce1.length() / 2;
     size_t en2_len = mWorker.extranonce2.length() / 2;
-    if (en2_len > 4) en2_len = 4;
+    if (en1_len > sizeof(extra)) en1_len = sizeof(extra);
+    for (size_t i = 0; i < en1_len; i++) {
+        char b[3] = { mWorker.extranonce1[2*i], mWorker.extranonce1[2*i+1], 0 };
+        extra[i] = (uint8_t)strtoul(b, nullptr, 16);
+    }
+    size_t en2_room = sizeof(extra) - en1_len;
+    if (en2_len > en2_room) en2_len = en2_room;
     for (size_t i = 0; i < en2_len; i++) {
         char b[3] = { mWorker.extranonce2[2*i], mWorker.extranonce2[2*i+1], 0 };
-        en2[i] = (uint8_t)strtoul(b, nullptr, 16);
+        extra[en1_len + i] = (uint8_t)strtoul(b, nullptr, 16);
     }
-    memcpy(out_work_data + 144, en2, 4);
+    memcpy(out_work_data + 144, extra, sizeof(extra));
+
+    Serial.printf("[BLAKE3] job=%s prev=%s en1=%s en2=%s ntime=%s\\n",
+                  mJob.job_id.c_str(), mJob.prev_block_hash.c_str(),
+                  mWorker.extranonce1.c_str(), mWorker.extranonce2.c_str(),
+                  mJob.ntime.c_str());
 
     // ntime already present in coinb1 at offset 136 — leave it.
     // (verified: coinb1[100..103] == notify ntime hex bytes)
@@ -232,10 +238,9 @@ void minerWorkerBlake3(void *task_id) {
                 decred_blake3_pow_hash_raw(work_buf, hash);
 
                 double d = blake3HashDifficulty(hash);
-                // Require hash[31]==0 so we don't spam the pool when it sets
-                // difficulty=1 (Suprnova default).  Real target math would be
-                // better; this is a practical rate limit for ESP32 hashrate.
-                if (hash[31] == 0 && d >= job->pool_difficulty) {
+                // Compare the complete 256-bit hash-derived difficulty.
+                // This works for diff=1 as well as low fixed test difficulties.
+                if (d >= job->pool_difficulty) {
                     auto res = std::make_shared<Blake3JobResult>();
                     res->job_serial = job->job_serial;
                     res->found_share = true;
@@ -257,7 +262,23 @@ void minerWorkerBlake3(void *task_id) {
             }
             hashes += nonces_done;
         } else {
-            vTaskDelay(2 / portTICK_PERIOD_MS);
+            // Keep mining the current job continuously.  The old code queued
+            // only six 8192-nonce chunks per notify (49,152 nonces total) and
+            // then went idle until the next pool job.
+            {
+                std::lock_guard<std::mutex> lock(s_blake3_mutex);
+                if (s_blake3_current_serial != 0) {
+                    auto next = std::make_shared<Blake3JobRequest>();
+                    next->job_serial = s_blake3_current_serial;
+                    next->nonce_start = s_blake3_nonce_cursor;
+                    next->nonce_count = BLAKE3_NONCE_PER_CHUNK;
+                    next->pool_difficulty = s_blake3_pool_difficulty;
+                    memcpy(next->work_data, s_blake3_work_data, sizeof(s_blake3_work_data));
+                    s_blake3_nonce_cursor += BLAKE3_NONCE_PER_CHUNK;
+                    job = next;
+                }
+            }
+            if (!job) vTaskDelay(2 / portTICK_PERIOD_MS);
         }
 
         if (++wdt_counter >= 8) {
@@ -270,14 +291,22 @@ void minerWorkerBlake3(void *task_id) {
 static void pushBlake3Chunks(const uint8_t work_data[192], double pool_difficulty) {
     std::lock_guard<std::mutex> lock(s_blake3_mutex);
     s_blake3_current_serial++;
-    s_blake3_requests.clear(); // drop any stale chunks from the previous job
-    for (int i = 0; i < 6; i++) {
+    s_blake3_requests.clear(); // drop stale chunks from the previous job
+    s_blake3_results.clear();  // never submit a result from an old job
+    s_blake3_nonce_cursor = 0;
+    s_blake3_pool_difficulty = pool_difficulty;
+    memcpy(s_blake3_work_data, work_data, sizeof(s_blake3_work_data));
+
+    // Prime enough work for both hashing cores.  Each worker replenishes its
+    // own chunk when the queue becomes empty, so a job no longer stops after
+    // 49,152 nonces.
+    for (int i = 0; i < 2; i++) {
         auto j = std::make_shared<Blake3JobRequest>();
         j->job_serial = s_blake3_current_serial;
         j->nonce_start = s_blake3_nonce_cursor;
         j->nonce_count = BLAKE3_NONCE_PER_CHUNK;
         j->pool_difficulty = pool_difficulty;
-        memcpy(j->work_data, work_data, 192);
+        memcpy(j->work_data, work_data, sizeof(s_blake3_work_data));
         s_blake3_requests.push_back(j);
         s_blake3_nonce_cursor += BLAKE3_NONCE_PER_CHUNK;
     }
@@ -349,6 +378,28 @@ void runStratumWorkerBlake3(void *name) {
 
         if (s_blake3_client.available()) {
             String line = s_blake3_client.readStringUntil('\n');
+
+            // mining.submit replies do not have a method field.  Track them
+            // explicitly so the UI counts accepted shares, not merely sent
+            // submissions.
+            unsigned long response_id = parse_extract_id(line);
+            if (response_id != 0) {
+                std::lock_guard<std::mutex> lock(s_blake3_mutex);
+                auto it = s_blake3_pending_submit_ids.find(response_id);
+                if (it != s_blake3_pending_submit_ids.end()) {
+                    bool accepted = line.indexOf("\"error\":null") >= 0 &&
+                                    line.indexOf("\"result\":true") >= 0;
+                    if (accepted) {
+                        shares++;
+                        Serial.printf("[BLAKE3] SHARE ACCEPTED id=%lu\\n", response_id);
+                    } else {
+                        Serial.printf("[BLAKE3] SHARE REJECTED id=%lu: %s\\n",
+                                      response_id, line.c_str());
+                    }
+                    s_blake3_pending_submit_ids.erase(it);
+                }
+            }
+
             stratum_method method = parse_mining_method(line);
 
             if (method == MINING_NOTIFY) {
@@ -403,7 +454,10 @@ void runStratumWorkerBlake3(void *name) {
                               nonceHex, r->share_difficulty, mWorker.extranonce2.c_str());
                 Serial.print("  Sending  : "); Serial.print(payload);
                 s_blake3_client.print(payload);
-                shares++;
+                {
+                    std::lock_guard<std::mutex> lock(s_blake3_mutex);
+                    s_blake3_pending_submit_ids.insert(submit_id_ctr);
+                }
                 vTaskDelay(40 / portTICK_PERIOD_MS);
             }
         }
