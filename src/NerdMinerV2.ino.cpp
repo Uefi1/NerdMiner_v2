@@ -13,6 +13,9 @@
 #include "mbedtls/md.h"
 #include "wManager.h"
 #include "mining.h"
+#ifdef NERDMINER_BLAKE3
+#include "mining_blake3.h"
+#endif
 #include "monitor.h"
 #include "drivers/displays/display.h"
 #include "drivers/storage/SDCard.h"
@@ -148,6 +151,10 @@ void setup()
 
   /******** CREATE STRATUM TASK *****/
   static const char stratum_name[] = "(Stratum)";
+#ifdef NERDMINER_BLAKE3
+  // BLAKE3/Decred build: self-contained Stratum worker, see mining_blake3.cpp
+  BaseType_t res2 = xTaskCreatePinnedToCore(runStratumWorkerBlake3, "Stratum", 15000, (void*)stratum_name, 4, NULL,1);
+#else
  #if defined(CONFIG_IDF_TARGET_ESP32) && !defined(ESP32_2432S028R) && !defined(ESP32_2432S028_2USB)
   // Reduced stack for ESP32 classic to save memory
   BaseType_t res2 = xTaskCreatePinnedToCore(runStratumWorker, "Stratum", 12000, (void*)stratum_name, 4, NULL,1);
@@ -157,6 +164,7 @@ void setup()
  #else
   BaseType_t res2 = xTaskCreatePinnedToCore(runStratumWorker, "Stratum", 15000, (void*)stratum_name, 4, NULL,1);
  #endif
+#endif
 
   /******** CREATE MINER TASKS *****/
   //for (size_t i = 0; i < THREADS; i++) {
@@ -166,6 +174,16 @@ void setup()
   // Start mining tasks
   //BaseType_t res = xTaskCreate(runWorker, name, 35000, (void*)name, 1, NULL);
   TaskHandle_t minerTask1, minerTask2 = NULL;
+#ifdef NERDMINER_BLAKE3
+  // BLAKE3 has no ESP32 hardware accelerator (unlike SHA256), so both
+  // cores run the same software worker -- no HW/SW split needed.
+  xTaskCreatePinnedToCore(minerWorkerBlake3, "MinerBlake3-0", 4096, (void*)0, 3, &minerTask1, 0);
+  esp_task_wdt_add(minerTask1);
+#if (SOC_CPU_CORES_NUM >= 2)
+  xTaskCreatePinnedToCore(minerWorkerBlake3, "MinerBlake3-1", 4096, (void*)1, 1, &minerTask2, 1);
+  esp_task_wdt_add(minerTask2);
+#endif
+#else
   #ifdef HARDWARE_SHA265
     #if defined(CONFIG_IDF_TARGET_ESP32)
     xTaskCreatePinnedToCore(minerWorkerHw, "MinerHw-0", 3584, (void*)0, 3, &minerTask1, 0);
@@ -189,6 +207,7 @@ void setup()
   xTaskCreatePinnedToCore(minerWorkerSw, "MinerSw-1", 6000, (void*)1, 1, &minerTask2, 1);
   #endif
   esp_task_wdt_add(minerTask2);
+#endif
 #endif
 
   vTaskPrioritySet(NULL, 4);
