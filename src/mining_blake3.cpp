@@ -45,6 +45,8 @@ static bool s_blake3_subscribed = false;
 // monitor.cpp) -- reused here so the existing UI/stats screens pick up
 // BLAKE3 mining activity without any changes to the display code.
 extern monitor_data mMonitor;
+extern TSettings Settings;   // defined in wManager.cpp; same extern pattern
+                              // already used in mining.cpp and monitor.cpp
 extern uint32_t hashes;      // total hashes computed, feeds the hashrate display
 extern uint32_t shares;      // shares that beat pool difficulty
 extern volatile uint32_t valids; // hashes that beat full network difficulty
