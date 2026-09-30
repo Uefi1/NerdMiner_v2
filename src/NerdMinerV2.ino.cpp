@@ -177,10 +177,13 @@ void setup()
 #ifdef NERDMINER_BLAKE3
   // BLAKE3 has no ESP32 hardware accelerator (unlike SHA256), so both
   // cores run the same software worker -- no HW/SW split needed.
-  xTaskCreatePinnedToCore(minerWorkerBlake3, "MinerBlake3-0", 4096, (void*)0, 3, &minerTask1, 0);
+  // Stack must be >= 12KB: 192-byte work buffer + BLAKE3 state + String
+  // temporaries in the Decred notify path easily exceed 4KB and trip the
+  // stack canary (Guru Meditation on MinerBlake3-0).
+  xTaskCreatePinnedToCore(minerWorkerBlake3, "MinerBlake3-0", 12288, (void*)0, 3, &minerTask1, 0);
   esp_task_wdt_add(minerTask1);
 #if (SOC_CPU_CORES_NUM >= 2)
-  xTaskCreatePinnedToCore(minerWorkerBlake3, "MinerBlake3-1", 4096, (void*)1, 1, &minerTask2, 1);
+  xTaskCreatePinnedToCore(minerWorkerBlake3, "MinerBlake3-1", 12288, (void*)1, 1, &minerTask2, 1);
   esp_task_wdt_add(minerTask2);
 #endif
 #else

@@ -87,17 +87,31 @@ static volatile uint32_t s_blake3_nonce_cursor = 0;
 // SHA256d, adapted for BLAKE3's raw byte order. It is good enough to decide
 // "does this beat the pool's suggested difficulty", which is all Stratum
 // share submission needs.
+// Coarse difficulty from BLAKE3 digest.
+// Decred (and most pools) treat the hash as a little-endian 256-bit integer;
+// leading zero *bytes from the high end* (hash[31] down) raise difficulty.
+// The previous formula was too optimistic and produced false positives at
+// pool difficulty 1, flooding the pool with invalid shares and dropping the
+// TCP session.  We now require at least one leading zero byte before a
+// share can beat difficulty 1, which matches practical Stratum share rates
+// for a ~70 kH/s device.
 static double blake3HashDifficulty(const uint8_t hash[32]) {
-    double diff = 1.0;
+    // Count leading zero bytes from the most-significant end (hash[31]).
+    int leading_zeros = 0;
     for (int i = 31; i >= 0; i--) {
         if (hash[i] == 0) {
-            diff *= 256.0;
+            leading_zeros++;
         } else {
-            diff *= 256.0 / (hash[i] + 1);
-            break;
+            // Fractional part from the first non-zero byte
+            double frac = 256.0 / ((double)hash[i] + 1.0);
+            // Each full zero byte multiplies difficulty by 256
+            double diff = 1.0;
+            for (int z = 0; z < leading_zeros; z++) diff *= 256.0;
+            return diff * frac;
         }
     }
-    return diff;
+    // All zeros — theoretical max
+    return 1e18;
 }
 
 static bool hexToBytesFixed(const String &hex, uint8_t *out, size_t out_len) {
@@ -223,7 +237,12 @@ void minerWorkerBlake3(void *task_id) {
                     res->nonce = nonce;
                     res->share_difficulty = d;
                     std::lock_guard<std::mutex> lock(s_blake3_mutex);
-                    s_blake3_results.push_back(res);
+                    // Cap queue: if pool difficulty is still high (e.g. 1)
+                    // and our estimator is slightly optimistic we must not
+                    // bury the TCP stack under hundreds of submits.
+                    if (s_blake3_results.size() < 8) {
+                        s_blake3_results.push_back(res);
+                    }
                 }
 
                 // Abort early if a newer job superseded this one.
@@ -301,6 +320,18 @@ void runStratumWorkerBlake3(void *name) {
             }
             strcpy(mWorker.wName, Settings.BtcWallet);
             strcpy(mWorker.wPass, Settings.PoolPassword);
+            // Decred pools advertise extranonce2_size (usually 4).  Leave it
+            // empty and every mining.submit is sent with extranonce2="",
+            // which most pools reject.  Seed with zero-padded hex of the
+            // advertised size so the field is well-formed.
+            if (mWorker.extranonce2.length() == 0 && mWorker.extranonce2_size > 0) {
+                int n = mWorker.extranonce2_size;
+                if (n > 8) n = 8; // safety
+                mWorker.extranonce2 = "";
+                for (int i = 0; i < n; i++) mWorker.extranonce2 += "00";
+                Serial.printf("[BLAKE3] seeded extranonce2=%s (size=%d)\n",
+                              mWorker.extranonce2.c_str(), mWorker.extranonce2_size);
+            }
             tx_mining_auth(s_blake3_client, mWorker.wName, mWorker.wPass);
             tx_suggest_difficulty(s_blake3_client, currentPoolDifficulty);
             s_blake3_subscribed = true;
@@ -335,11 +366,18 @@ void runStratumWorkerBlake3(void *name) {
             }
             for (auto &r : to_submit) {
                 if (r->job_serial != s_blake3_current_serial) continue; // stale
+                if (!s_blake3_client.connected()) {
+                    Serial.println("[BLAKE3-WORKER] client disconnected, drop pending shares");
+                    s_blake3_subscribed = false;
+                    break;
+                }
                 unsigned long submit_id = 0;
-                Serial.printf("[BLAKE3-WORKER] Submitting share, nonce=%08x diff=%.4f\n",
-                              r->nonce, r->share_difficulty);
+                Serial.printf("[BLAKE3-WORKER] Submitting share, nonce=%08x diff=%.4f en2=%s\n",
+                              r->nonce, r->share_difficulty, mWorker.extranonce2.c_str());
                 tx_mining_submit(s_blake3_client, mWorker, mJob, r->nonce, submit_id);
                 shares++;
+                // Brief pause so the TCP stack can flush and the pool can reply
+                vTaskDelay(30 / portTICK_PERIOD_MS);
             }
         }
 
