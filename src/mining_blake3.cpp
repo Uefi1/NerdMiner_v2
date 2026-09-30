@@ -189,9 +189,21 @@ static bool buildBlake3WorkData(const mining_subscribe &mWorker,
     }
     memcpy(out_work_data + 148, en2, 4);
 
-    // Do NOT rewrite timestamp: coinb1 already carries the pool ntime at
-    // offset 136.  strtoul+LE rewrite was byte-swapping it vs what the pool
-    // reconstructs from the ntime string in mining.submit.
+    // Timestamp @ 136: MUST match what the pool writes when it validates
+    // mining.submit (it overwrites this field with the ntime param).
+    // Write the ntime hex string as raw bytes (same order as the hex
+    // digits), identical to how extranonce1 is applied — not strtoul+LE,
+    // which byte-swaps and desyncs from coinb1 / pool reconstruction.
+    // Result of mismatch: pool reports "Low diff: 0.00".
+    {
+        const String &nt = mJob.ntime;
+        if (nt.length() >= 8) {
+            for (int i = 0; i < 4; i++) {
+                char b[3] = { nt[2*i], nt[2*i+1], 0 };
+                out_work_data[136 + i] = (uint8_t)strtoul(b, nullptr, 16);
+            }
+        }
+    }
 
     return true;
 }

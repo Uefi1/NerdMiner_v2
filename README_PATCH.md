@@ -1,34 +1,25 @@
-# BLAKE3 / Decred patch v3
+# BLAKE3 / Decred patch v4
 
-## Why v2 still got Low diff: 0.00
+## Root cause of "Low diff: 0.00"
 
-Pool accepted the nonce format, but when it rebuilt the header from
-(submit params) the PoW hash had difficulty 0.00 — header bytes did not
-match what we hashed locally.
+Pool rebuilds the header from (job + extranonce2 + **ntime** + nonce)
+and hashes it. We were hashing a header whose timestamp still came from
+coinb1 and did not match the ntime we put in mining.submit → pool hash
+had difficulty 0.00.
 
-Root causes fixed in v3:
-1. **extranonce2 was written at offset 152** — correct Decred layout is
-   nonce@140, en1@144, **en2@148** (gominer Nonce2Word).
-2. **timestamp was rewritten with strtoul+LE** which byte-swapped the
-   ntime already present in coinb1; pool uses the ntime string as in notify.
+## v4 fix
 
-## Full fix list (v1–v3)
-
-- Stack 12288
-- Seed extranonce2
-- 8-char padded nonce in submit
-- No mining.suggest_difficulty
-- Share filter hash[31]==0
-- en2 @ 148
-- Leave ntime from coinb1 alone
+Write `mJob.ntime` into header offset 136 as **raw hex bytes**
+(same style as extranonce1), so local hash == pool hash.
 
 ## Apply
 
-Copy into repo:
 ```
 src/NerdMinerV2.ino.cpp
 src/mining_blake3.cpp
 ```
+
 Rebuild with `-D NERDMINER_BLAKE3=1`.
 
-Expect either `result: true` or a real difficulty number — not `0.00`.
+Success looks like: `"result":true` or a non-zero difficulty in the error
+(not `0.00`).
