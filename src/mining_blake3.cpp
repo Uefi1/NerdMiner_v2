@@ -10,15 +10,26 @@
 // PROTOCOL MAPPING (verified against decred/gominer's stratum.go and the
 // official DCP0011 test vectors -- see test_stratum_mapping.c):
 //   work_data[192] = version(4) + prevhash(32) + partialHeader(144), zero-padded
-//     - params[1] (hash)   -> prevhash, used AS-IS (internal order, no reversal)
-//     - params[2] (coinb1) -> the 144-byte partial header (offset 36..180)
+//     - params[1] (hash)   -> prevhash, used AS-IS (internal order, no
+//       reversal). This is read directly from gominer's PrepWork(), the
+//       official Decred Stratum reference client -- it copies prevHashBytes
+//       verbatim with no byte-order conversion. A previous revision of this
+//       file full-reversed it based on an unsourced "Yiimp sends BE" claim;
+//       that claim has no corroborating source and contradicts gominer, so
+//       it's reverted here pending real accept/reject evidence from a pool.
+//     - params[2] (coinb1) -> the 144-byte partial header (offset 36..180),
+//       already includes the correct stake_version in its last 4 bytes
 //     - params[5] (version)-> block version
 //     - params[3]/[4] (coinb2/merkle_branch) are NOT used for Decred
-//   nonce (searched by the worker tasks)      -> byte offset 140 (LE)
-//   extraData / extranonce2 from submit       -> byte offset 144
-//     Yiimp/Suprnova create_decred_header only binlify(nonce2) into extra[].
-//     Do NOT write pool extranonce1 into the header — pool does not.
-//   timestamp already in coinb1 @136
+//   nonce (searched by the worker tasks)      -> byte offset 140 (LE), 4 bytes
+//   extranonce1 || extranonce2 (pool identity)-> byte offset 144, EXACTLY
+//     32 bytes (offset 144..176) -- NOT 36. DCP0011's extra_data field
+//     spans [140,176) and stake_version spans [176,180); a previous
+//     revision wrote 36 bytes starting at 144 (i.e. through byte 180),
+//     which zeroes stake_version with the extra[] array's padding and
+//     produces a corrupted header / wrong hash on every single job. Fixed
+//     here: the identity blob is capped at 32 bytes so it never touches
+//     stake_version.
 //   submit params = [wallet, jobId, extranonce2, ntime, nonceHex]
 
 #include <Arduino.h>
@@ -84,27 +95,12 @@ static uint8_t s_blake3_work_data[192] = {0};
 static double s_blake3_pool_difficulty = DEFAULT_DIFFICULTY;
 static std::set<unsigned long> s_blake3_pending_submit_ids;
 
-// Interprets a raw BLAKE3 hash (little-endian 256-bit) as a coarse
-// difficulty value: counts leading zero bytes/the magnitude of the first
-// non-zero byte from the most-significant end. This is the same style of
-// approximation `diff_from_target()` uses elsewhere in this project for
-// SHA256d, adapted for BLAKE3's raw byte order. It is good enough to decide
-// "does this beat the pool's suggested difficulty", which is all Stratum
-// share submission needs.
-// Coarse difficulty from BLAKE3 digest.
-// Decred (and most pools) treat the hash as a little-endian 256-bit integer;
-// leading zero *bytes from the high end* (hash[31] down) raise difficulty.
-// The previous formula was too optimistic and produced false positives at
-// pool difficulty 1, flooding the pool with invalid shares and dropping the
-// TCP session.  We now require at least one leading zero byte before a
-// share can beat difficulty 1, which matches practical Stratum share rates
-// for a ~70 kH/s device.
+// Coarse difficulty from a BLAKE3 digest. Decred (like Bitcoin) treats the
+// hash as a little-endian 256-bit integer, so the project's existing
+// le256todouble()-based diff_from_target() is directly reusable here --
+// it already does the correct little-endian interpretation, it's just
+// never been fed a BLAKE3 hash before.
 static double blake3HashDifficulty(const uint8_t hash[32]) {
-    // Reuse the project's exact 256-bit difficulty conversion.  The old
-    // BLAKE3 code estimated difficulty from leading zero bytes, which made
-    // almost every hash with hash[31] == 0 look like a valid diff-1 share.
-    // Yiimp/Suprnova checks the full 256-bit value, so use the same
-    // little-endian interpretation here.
     return diff_from_target((void *)hash);
 }
 
@@ -125,11 +121,6 @@ static bool hexToBytesFixed(const String &hex, uint8_t *out, size_t out_len) {
 static bool buildBlake3WorkData(const mining_subscribe &mWorker,
                                  const mining_job &mJob,
                                  uint8_t out_work_data[192]) {
-    // Yiimp/Suprnova Decred header reconstruction:
-    //   version | prevhash | 144-byte header tail
-    // nonce is at header offset 140 and the 36-byte extra field starts at 144.
-    // The exact extranonce layout depends on the pool's subscribe response,
-    // so v7 writes extranonce1 || extranonce2 exactly as advertised.
     memset(out_work_data, 0, 192);
 
     uint8_t block_version[4];
@@ -150,29 +141,32 @@ static bool buildBlake3WorkData(const mining_subscribe &mWorker,
         return false;
     }
 
-    memcpy(out_work_data + 0,  block_version, 4);
+    memcpy(out_work_data + 0, block_version, 4);
 
-    // Yiimp sends prevhash_be, i.e. the human-readable/display form.
-    // The Decred block header stores the previous hash in internal order,
-    // which is the FULL 32-byte reverse of prevhash_be.  Swapping bytes
-    // inside each 32-bit word (the old patch) is not enough: it leaves the
-    // eight words in the wrong order and therefore hashes a different block.
-    for (int i = 0; i < 32; i++) {
-        out_work_data[4 + i] = prev_hash[31 - i];
-    }
+    // prevhash: used AS-IS, no byte reversal. Verified against gominer's
+    // PrepWork() (the official Decred Stratum reference client), which
+    // copies this field verbatim -- see the header comment above for why
+    // an earlier full-reversal here was reverted.
+    memcpy(out_work_data + 4, prev_hash, 32);
 
-    memcpy(out_work_data + 36, partial_header, 144); // through stake version @176
+    // partial_header already carries bytes [36,180) of the real header,
+    // i.e. merkle_root .. stake_version, INCLUDING a correct stake_version
+    // in its last 4 bytes. Copy it whole first; the extra[]/nonce writes
+    // below only touch [140,176), never [176,180).
+    memcpy(out_work_data + 36, partial_header, 144);
 
-    // Nonce @140: zero; worker writes LE uint32 while hashing
+    // Nonce @ offset 140, 4 bytes. Zeroed here; the worker task fills in
+    // the real searched value per-attempt.
     memset(out_work_data + 140, 0, 4);
 
-    // ExtraData starts at header offset 144 and is 36 bytes in DCP0011.
-    // For Stratum/Haste the pool identity is extranonce1 || extranonce2.
-    // The previous patch wrote only extranonce2, so the ESP32 hashed a
-    // different header than the pool.  This is especially important for
-    // yiimp/Suprnova: some deployments use 4+4 bytes, while yiimp's
-    // Decred-specific path can use 24+12 bytes.  Both fit exactly here.
-    uint8_t extra[36] = {0};
+    // Pool identity (extranonce1 || extranonce2) goes at offset 144.
+    // DCP0011's extra_data field spans [140,176) -- 36 bytes total, of
+    // which [140,144) is the nonce above, leaving exactly 32 bytes at
+    // [144,176) for the pool identity. This must NOT extend to 176, or it
+    // overwrites stake_version at [176,180) -- that was the bug in the
+    // previous revision (it used a 36-byte write starting at 144, i.e.
+    // through byte 180).
+    uint8_t extra[32] = {0};
     size_t en1_len = mWorker.extranonce1.length() / 2;
     size_t en2_len = mWorker.extranonce2.length() / 2;
     if (en1_len > sizeof(extra)) en1_len = sizeof(extra);
@@ -186,15 +180,15 @@ static bool buildBlake3WorkData(const mining_subscribe &mWorker,
         char b[3] = { mWorker.extranonce2[2*i], mWorker.extranonce2[2*i+1], 0 };
         extra[en1_len + i] = (uint8_t)strtoul(b, nullptr, 16);
     }
-    memcpy(out_work_data + 144, extra, sizeof(extra));
+    memcpy(out_work_data + 144, extra, sizeof(extra)); // [144,176) only
 
-    Serial.printf("[BLAKE3] job=%s prev=%s en1=%s en2=%s ntime=%s\\n",
+    Serial.printf("[BLAKE3] job=%s prev=%s en1=%s en2=%s ntime=%s\n",
                   mJob.job_id.c_str(), mJob.prev_block_hash.c_str(),
                   mWorker.extranonce1.c_str(), mWorker.extranonce2.c_str(),
                   mJob.ntime.c_str());
 
-    // ntime already present in coinb1 at offset 136 — leave it.
-    // (verified: coinb1[100..103] == notify ntime hex bytes)
+    // ntime already present inside coinb1 at offset 136 (part of
+    // partial_header) -- left untouched.
 
     return true;
 }
@@ -238,8 +232,6 @@ void minerWorkerBlake3(void *task_id) {
                 decred_blake3_pow_hash_raw(work_buf, hash);
 
                 double d = blake3HashDifficulty(hash);
-                // Compare the complete 256-bit hash-derived difficulty.
-                // This works for diff=1 as well as low fixed test difficulties.
                 if (d >= job->pool_difficulty) {
                     auto res = std::make_shared<Blake3JobResult>();
                     res->job_serial = job->job_serial;
@@ -262,9 +254,9 @@ void minerWorkerBlake3(void *task_id) {
             }
             hashes += nonces_done;
         } else {
-            // Keep mining the current job continuously.  The old code queued
-            // only six 8192-nonce chunks per notify (49,152 nonces total) and
-            // then went idle until the next pool job.
+            // Keep mining the current job continuously by self-replenishing
+            // a fresh nonce-range chunk, rather than going idle after a
+            // fixed number of chunks and waiting for the next mining.notify.
             {
                 std::lock_guard<std::mutex> lock(s_blake3_mutex);
                 if (s_blake3_current_serial != 0) {
@@ -297,9 +289,9 @@ static void pushBlake3Chunks(const uint8_t work_data[192], double pool_difficult
     s_blake3_pool_difficulty = pool_difficulty;
     memcpy(s_blake3_work_data, work_data, sizeof(s_blake3_work_data));
 
-    // Prime enough work for both hashing cores.  Each worker replenishes its
-    // own chunk when the queue becomes empty, so a job no longer stops after
-    // 49,152 nonces.
+    // Prime enough work for both hashing cores. Each worker replenishes its
+    // own chunk when the queue becomes empty, so a job no longer stalls
+    // after a fixed number of nonces.
     for (int i = 0; i < 2; i++) {
         auto j = std::make_shared<Blake3JobRequest>();
         j->job_serial = s_blake3_current_serial;
@@ -326,7 +318,6 @@ void runStratumWorkerBlake3(void *name) {
     mining_job mJob;
     double currentPoolDifficulty = DEFAULT_DIFFICULTY;
     uint32_t last_job_time = millis();
-    uint32_t last_share_check = millis();
 
     while (true) {
         if (WiFi.status() != WL_CONNECTED) {
@@ -354,9 +345,9 @@ void runStratumWorkerBlake3(void *name) {
             }
             strcpy(mWorker.wName, Settings.BtcWallet);
             strcpy(mWorker.wPass, Settings.PoolPassword);
-            // Decred pools advertise extranonce2_size (usually 4).  Leave it
+            // Decred pools advertise extranonce2_size (usually 4). Leave it
             // empty and every mining.submit is sent with extranonce2="",
-            // which most pools reject.  Seed with zero-padded hex of the
+            // which most pools reject. Seed with zero-padded hex of the
             // advertised size so the field is well-formed.
             if (mWorker.extranonce2.length() == 0 && mWorker.extranonce2_size > 0) {
                 int n = mWorker.extranonce2_size;
@@ -367,10 +358,9 @@ void runStratumWorkerBlake3(void *name) {
                               mWorker.extranonce2.c_str(), mWorker.extranonce2_size);
             }
             tx_mining_auth(s_blake3_client, mWorker.wName, mWorker.wPass);
-            // Suprnova (and many Decred pools) do NOT implement
+            // Many Decred pools (e.g. Suprnova) do not implement
             // mining.suggest_difficulty -- sending it only produces
-            // {"error":{"code":20,"message":"Unknown method:..."}} noise.
-            // Rely on mining.set_difficulty from the pool instead.
+            // error-code noise. Rely on mining.set_difficulty instead.
             // tx_suggest_difficulty(s_blake3_client, currentPoolDifficulty);
             s_blake3_subscribed = true;
             last_job_time = millis();
@@ -379,9 +369,9 @@ void runStratumWorkerBlake3(void *name) {
         if (s_blake3_client.available()) {
             String line = s_blake3_client.readStringUntil('\n');
 
-            // mining.submit replies do not have a method field.  Track them
-            // explicitly so the UI counts accepted shares, not merely sent
-            // submissions.
+            // mining.submit replies have no "method" field. Track pending
+            // submit ids explicitly so the UI counts ACCEPTED shares, not
+            // merely sent submissions.
             unsigned long response_id = parse_extract_id(line);
             if (response_id != 0) {
                 std::lock_guard<std::mutex> lock(s_blake3_mutex);
@@ -391,9 +381,9 @@ void runStratumWorkerBlake3(void *name) {
                                     line.indexOf("\"result\":true") >= 0;
                     if (accepted) {
                         shares++;
-                        Serial.printf("[BLAKE3] SHARE ACCEPTED id=%lu\\n", response_id);
+                        Serial.printf("[BLAKE3] SHARE ACCEPTED id=%lu\n", response_id);
                     } else {
-                        Serial.printf("[BLAKE3] SHARE REJECTED id=%lu: %s\\n",
+                        Serial.printf("[BLAKE3] SHARE REJECTED id=%lu: %s\n",
                                       response_id, line.c_str());
                     }
                     s_blake3_pending_submit_ids.erase(it);
@@ -431,14 +421,11 @@ void runStratumWorkerBlake3(void *name) {
                     s_blake3_subscribed = false;
                     break;
                 }
-                // CRITICAL: String(nonce, HEX) drops leading zeros → pool
-                // replies "Invalid nonce". Decred (and ckpool/Bitcoin) need
-                // a fixed 8-char lowercase hex nonce field.
+                // Fixed 8-char lowercase hex nonce -- String(nonce, HEX)
+                // drops leading zeros, which pools reject as "Invalid nonce".
                 char nonceHex[9];
                 snprintf(nonceHex, sizeof(nonceHex), "%08x", (unsigned)r->nonce);
 
-                // Build submit ourselves so we control nonce formatting.
-                // Same param order as tx_mining_submit: worker, jobId, en2, ntime, nonce
                 static unsigned long submit_id_ctr = 100;
                 submit_id_ctr++;
                 char payload[512];
